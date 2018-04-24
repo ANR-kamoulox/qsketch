@@ -24,6 +24,9 @@ class Projectors(Dataset):
         result = np.empty((len(idx), self.data_dim, self.data_dim))
         for pos, id in enumerate(idx):
             np.random.seed(id)
+            #result[pos] = np.random.randn(self.data_dim, self.data_dim)
+            #result[pos] /= np.linalg.norm(result[pos], axis=-1)
+
             '''A Random matrix distributed with Haar measure,
             From Francesco Mezzadri:
             @article{mezzadri2006generate,
@@ -60,8 +63,9 @@ def main_sketch(dataset, output, num_sketches,
     nimg_batch = int(memory_usage*2**30 / data_bytes)
     num_samples = len(data)
     if clipto is not None:
-        nimg_batch = min(nimg_batch, clipto)
         num_samples = min(num_samples, clipto)
+        nimg_batch = min(nimg_batch, clipto)
+    nimg_batch = min(nimg_batch, num_samples)
 
     data_loader = torch.utils.data.DataLoader(data, batch_size=nimg_batch)
 
@@ -74,18 +78,31 @@ def main_sketch(dataset, output, num_sketches,
     # allocate the sketch variable (quantile function)
     qf = np.zeros((num_sketches, data_dim, num_quantiles))
 
+    if nimg_batch == num_samples:
+        # Everything fits into memory: load only once
+        print('Loading all data...')
+        for img, labels in data_loader:
+            imgs_all = torch.Tensor(img).view(-1, data_dim).numpy()
+        print('done.')
+    else:
+        # Will have to load several times
+        imgs_all = None
+
     # proceed to projection
     for batch in tqdm.tqdm(sketch_loader):
         # initialize projections
-        projections = np.zeros((data_dim, num_samples))
         batch_proj = projectors[batch]
-        pos = 0
-        for img, labels in tqdm.tqdm(data_loader):
-            # load img numpy data
-            imgs_npy = torch.Tensor(img).view(-1, data_dim).numpy()
-            projections[:, pos:pos+len(img)] = batch_proj.dot(imgs_npy.T)
-            pos += len(img)
-            break
+        if imgs_all is None:
+            # loop over the data if not loaded once
+            pos = 0
+            projections = np.zeros((data_dim, num_samples))
+            for img, labels in tqdm.tqdm(data_loader):
+                # load img numpy data
+                imgs_npy = torch.Tensor(img).view(-1, data_dim).numpy()
+                projections[:, pos:pos+len(img)] = batch_proj.dot(imgs_npy.T)
+                pos += len(img)
+        else:
+            projections = batch_proj.dot(imgs_all.T)
 
         # compute the quantiles for each of these projections
         qf[batch] = np.percentile(projections, quantiles, axis=1).T
@@ -125,6 +142,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.root_data_dir is None:
         args.root_data_dir = 'data/'+args.dataset
+    if args.output is None:
+        args.output = args.dataset
     main_sketch(args.dataset,
                 args.output,
                 args.num_sketches,
