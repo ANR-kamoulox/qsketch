@@ -38,12 +38,12 @@ class Projectors(Dataset):
             d = np.diagonal(r)
             ph = d/np.absolute(d)
             result[pos] = np.multiply(q, ph, q)
-        return result
+        return np.squeeze(result)
 
 
 def main_sketch(dataset, output, num_sketches,
                 num_quantiles, img_size,
-                memory_usage, data_dir):
+                memory_usage, data_dir, clipto=None):
 
     # Data loading
     DATASET = getattr(datasets, dataset)
@@ -57,11 +57,13 @@ def main_sketch(dataset, output, num_sketches,
 
     # computing batch size, that fits in memory
     data_bytes = data_dim * data[0][0].element_size()
-    nimg_batch_in_ram = int(memory_usage*2**30 / data_bytes)
-
-    data_loader = torch.utils.data.DataLoader(data,
-                                              batch_size=nimg_batch_in_ram)
+    nimg_batch = int(memory_usage*2**30 / data_bytes)
     num_samples = len(data)
+    if clipto is not None:
+        nimg_batch = min(nimg_batch, clipto)
+        num_samples = min(num_samples, clipto)
+
+    data_loader = torch.utils.data.DataLoader(data, batch_size=nimg_batch)
 
     # prepare the sketch data
     projectors = Projectors(data_dim=data_dim, size=num_sketches)
@@ -76,7 +78,7 @@ def main_sketch(dataset, output, num_sketches,
     for batch in tqdm.tqdm(sketch_loader):
         # initialize projections
         projections = np.zeros((data_dim, num_samples))
-        batch_proj = np.squeeze(projectors[batch])
+        batch_proj = projectors[batch]
         pos = 0
         for img, labels in tqdm.tqdm(data_loader):
             # load img numpy data
