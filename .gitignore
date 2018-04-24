@@ -6,6 +6,14 @@ __pycache__/
 # C extensions
 *.so
 
+events.out*
+*ubyte
+*.pt
+*png
+*.pth
+*.npy
+data*
+
 # Distribution / packaging
 .Python
 env/
