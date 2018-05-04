@@ -4,8 +4,9 @@ import torch
 from torchvision import datasets
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
+from joblib import Parallel, delayed
+import multiprocessing
 from functools import reduce
-
 import tqdm
 import argparse
 import os
@@ -142,6 +143,12 @@ def load_data(dataset, clipto,
             imgs_npy = None
     return imgs_npy, data_loader, num_samples, data_dim
 
+def percentile(v, q):
+    return np.percentile(v,q)
+def fast_percentile(V,quantiles):
+    return np.array(Parallel(n_jobs=multiprocessing.cpu_count()-1)
+                    (delayed(percentile)(v,quantiles)
+                     for v in V))
 
 def main_sketch(dataset, output, projectors_class, num_sketches,
                 num_quantiles, img_size,
@@ -179,7 +186,8 @@ def main_sketch(dataset, output, projectors_class, num_sketches,
             # data is in memory as a ndarray
             projections = batch_proj.dot(imgs_npy.T)
         # compute the quantiles for each of these projections
-        qf[batch] = np.percentile(projections, quantiles, axis=1).T
+        qf[batch] = fast_percentile(projections, quantiles)
+        #qf[batch] = np.percentile(projections, quantiles, axis=1).T
 
     # save sketch
     np.save(output, {'qf': qf,
@@ -229,8 +237,13 @@ if __name__ == "__main__":
     if args.output is None:
         args.output = args.dataset
 
+    import cProfile
+    pr = cProfile.Profile()
+    pr.enable()
     main_sketch(args.dataset,
                 args.output,
                 args.projectors, args.num_sketches,
                 args.num_quantiles, args.img_size,
                 args.memory_usage, args.root_data_dir)
+    pr.disable()
+    pr.dump_stats('profile.prof')
