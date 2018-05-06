@@ -191,7 +191,11 @@ def main_sketch(dataset, output, projectors_class, num_sketches,
 
     # save sketch
     np.save(output, {'qf': qf,
-                     'projectors_class': projectors.__class__.__name__})
+                     'projectors_class': projectors.__class__.__name__})   
+    '''with open(output, 'wb') as f:
+        np.save(f, {'qf': qf,
+                     'projectors_class': projectors.__class__.__name__},
+                allow_pickle=True)'''
 
 
 if __name__ == "__main__":
