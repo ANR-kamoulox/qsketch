@@ -100,12 +100,13 @@ class UnitaryProjectors(Projectors):
         return np.squeeze(result)
 
 
-
 class NumpyDataset(Dataset):
     def __init__(self, array):
         self.data = array
+
     def __len__(self):
         return self.data.shape[0]
+
     def __getitem__(self, idx):
         return (self.data[idx], None)
 
@@ -130,6 +131,7 @@ class OneShotDataLoader(DataLoader):
 def load_data(dataset, clipto,
               data_dir="data", img_size=None, memory_usage=2):
     # Data loading
+    print('Loading data')
     if os.path.exists(dataset):
         # this is a ndarray saved by numpy.save. Just dataset and clipto are
         # useful
@@ -166,22 +168,26 @@ def load_data(dataset, clipto,
                 imgs_npy = torch.Tensor(img).view(-1, data_dim).numpy()
             npy_dataset = NumpyDataset(imgs_npy)
             data_loader = OneShotDataLoader(npy_dataset)
-            #data_loader = OneShotDataLoader(imgs_npy)
     return data_loader
 
-def fast_percentile(V,quantiles):
+
+def fast_percentile(V, quantiles):
     return np.array(Parallel(n_jobs=multiprocessing.cpu_count()-1)
-                    (delayed(np.percentile)(v,quantiles)
+                    (delayed(np.percentile)(v, quantiles)
                      for v in V))
 
+
 class SketchIterator:
-    def __init__(self, dataloader, projectors, num_quantiles, start, stop=None):
+    def __init__(self,
+                 dataloader, projectors, batch_size, num_quantiles,
+                 start, stop=-1):
         self.dataloader = dataloader
         self.projectors = projectors
         self.quantiles = np.linspace(0, 100, num_quantiles)
         self.start = start
-        self.stop = stop
+        self.stop = stop if stop >= 0 else None
         self.current = start
+        self.batch_size = batch_size
 
     def __iter__(self):
         return self
@@ -190,8 +196,10 @@ class SketchIterator:
         if self.stop is not None and (self.current >= self.stop):
             raise StopIteration
         else:
-            batch_proj = self.projectors[self.current]
-            self.current += 1
+            batch_proj = self.projectors[range(self.current,
+                                         self.current+self.batch_size)]
+            self.current += self.batch_size
+            batch_proj = np.reshape(batch_proj, [-1, self.projectors.data_dim])
 
             # loop over the data
             num_samples = len(self.dataloader.dataset)
@@ -200,7 +208,6 @@ class SketchIterator:
             pos = 0
             projections = None
             for img, labels in self.dataloader:
-                #import ipdb; ipdb.set_trace()
                 # load img numpy data
                 if isinstance(img, torch.Tensor):
                     img = torch.Tensor(img).numpy()
@@ -217,11 +224,11 @@ class SketchIterator:
             # compute the quantiles for each of these projections
             return fast_percentile(projections, self.quantiles), batch_proj
 
+
 def write_sketch(data_loader, output, projectors_class, num_sketches,
                  num_quantiles):
 
     # load data
-    num_samples = len(data_loader.dataset)
     data_dim = int(np.prod(data_loader.dataset[0][0].shape))
 
     # prepare the projectors
@@ -230,8 +237,8 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
 
     print('Sketching the data')
     # allocate the sketch variable (quantile function)
-    qf = np.array([s for s,p in
-                   tqdm.tqdm(SketchIterator(data_loader, projectors,
+    qf = np.array([s for s, p in
+                   tqdm.tqdm(SketchIterator(data_loader, projectors, 1,
                                             num_quantiles, 0, num_sketches))])
 
     # save sketch
@@ -240,12 +247,13 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
 
 
 def add_data_arguments(parser):
-    parser.add_argument("--dataset", help="either a file saved by numpy.save "
-                                    "containing a ndarray of shape "
-                                    "num_samples x data_dim, or the name "
-                                    "of the dataset to sketch, which "
-                                    "must be one of those supported in "
-                                    "torchvision.datasets")
+    parser.add_argument("dataset",
+                        help="either a file saved by numpy.save "
+                             "containing a ndarray of shape "
+                             "num_samples x data_dim, or the name "
+                             "of the dataset to sketch, which "
+                             "must be one of those supported in "
+                             "torchvision.datasets")
     parser.add_argument("--img_size",
                         help="Images are resized as s x s",
                         type=int,
@@ -258,6 +266,7 @@ def add_data_arguments(parser):
                         help="Root directory of the dataset. Defaults to"
                              "`data/\{dataset\}`")
     return parser
+
 
 def add_sketch_arguments(parser):
     parser.add_argument("--projectors",
@@ -273,10 +282,11 @@ def add_sketch_arguments(parser):
                         help="Number of quantiles to compute",
                         type=int,
                         default=100)
-
     return parser
 
+
 if __name__ == "__main__":
+    # parse arguments
     parser = argparse.ArgumentParser(description=
                                      'Sketch a torchvision dataset or a '
                                      'ndarray saved on disk.')
@@ -284,7 +294,6 @@ if __name__ == "__main__":
     parser = add_sketch_arguments(parser)
     parser.add_argument("--output",
                         help="Output file, defaults to the `dataset` argument")
-
     args = parser.parse_args()
 
     # parsing the dataset parameters and getting the data loader
@@ -305,8 +314,8 @@ if __name__ == "__main__":
     pr.enable()
 
     write_sketch(data_loader,
-                args.output,
-                args.projectors, args.num_sketches, args.num_quantiles)
+                 args.output,
+                 args.projectors, args.num_sketches, args.num_quantiles)
 
     pr.disable()
-    pr.dump_stats('profile.prof')
+    pr.dump_stats('sketch_profile.prof')
