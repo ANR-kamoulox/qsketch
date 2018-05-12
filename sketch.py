@@ -112,9 +112,10 @@ class NumpyDataset(Dataset):
 
 
 class OneShotDataLoader(DataLoader):
-    def __init__(self, dataset):
+    def __init__(self, dataset, clipto):
         self.dataset = dataset
         self.done = False
+        self.clipto = clipto
 
     def __iter__(self):
         self.done = False
@@ -125,7 +126,12 @@ class OneShotDataLoader(DataLoader):
             raise StopIteration
         else:
             self.done = True
-            return (self.dataset.data, None)
+            if self.clipto > 0:
+                #import ipdb; ipdb.set_trace()
+                order = np.random.permutation(self.dataset.data.shape[0])
+                return (self.dataset.data[order[:self.clipto]], None)
+            else:
+                return (self.dataset.data, None)
 
 
 def load_data(dataset, clipto,
@@ -136,11 +142,9 @@ def load_data(dataset, clipto,
         # this is a ndarray saved by numpy.save. Just dataset and clipto are
         # useful
         imgs_npy = np.load(dataset)
-        if clipto is not None:
-            imgs_npy = imgs_npy[:min(imgs_npy.shape[0], clipto)]
         num_samples = imgs_npy.shape[0]
         npy_dataset = NumpyDataset(imgs_npy)
-        data_loader = OneShotDataLoader(npy_dataset)
+        data_loader = OneShotDataLoader(npy_dataset, clipto)
     else:
         # this is a torchvision dataset
         DATASET = getattr(datasets, dataset)
@@ -155,23 +159,25 @@ def load_data(dataset, clipto,
         data_bytes = data_dim * data[0][0].element_size()
         nimg_batch = int(memory_usage*2**30 / data_bytes)
         num_samples = len(data)
-        if clipto is not None:
-            num_samples = min(num_samples, clipto)
-            nimg_batch = min(nimg_batch, clipto)
         nimg_batch = max(1, min(nimg_batch, num_samples))
-
-        data_loader = torch.utils.data.DataLoader(data, batch_size=nimg_batch)
 
         if nimg_batch == num_samples:
             # Everything fits into memory: load only once
+            data_loader = torch.utils.data.DataLoader(data,
+                                                      batch_size=nimg_batch)
             for img, labels in data_loader:
                 imgs_npy = torch.Tensor(img).view(-1, data_dim).numpy()
             npy_dataset = NumpyDataset(imgs_npy)
-            data_loader = OneShotDataLoader(npy_dataset)
+            data_loader = OneShotDataLoader(npy_dataset, clipto)
+        else:
+            data_loader = torch.utils.data.DataLoader(data, batch_size=clipto)
+
     return data_loader
 
 
 def fast_percentile(V, quantiles):
+    if V.shape[1] < 10000:
+        return np.percentile(V, quantiles, axis=1).T
     return np.array(Parallel(n_jobs=multiprocessing.cpu_count()-1)
                     (delayed(np.percentile)(v, quantiles)
                      for v in V))
@@ -180,7 +186,7 @@ def fast_percentile(V, quantiles):
 class SketchIterator:
     def __init__(self,
                  dataloader, projectors, batch_size, num_quantiles,
-                 start, stop=-1):
+                 start, stop=-1, clipto=-1):
         self.dataloader = dataloader
         self.projectors = projectors
         self.quantiles = np.linspace(0, 100, num_quantiles)
@@ -188,6 +194,9 @@ class SketchIterator:
         self.stop = stop if stop >= 0 else None
         self.current = start
         self.batch_size = batch_size
+        self.num_samples_per_batch = (clipto if clipto > 0
+                                      else len(self.dataloader.dataset))
+        self.clipto = clipto
 
     def __iter__(self):
         return self
@@ -196,6 +205,7 @@ class SketchIterator:
         if self.stop is not None and (self.current >= self.stop):
             raise StopIteration
         else:
+            #   import ipdb; ipdb.set_trace()
             batch_proj = self.projectors[range(self.current,
                                          self.current+self.batch_size)]
             self.current += self.batch_size
@@ -207,15 +217,16 @@ class SketchIterator:
 
             pos = 0
             projections = None
-            for img, labels in self.dataloader:
+            for index, (img, labels) in enumerate(self.dataloader):
                 # load img numpy data
                 if isinstance(img, torch.Tensor):
                     img = torch.Tensor(img).numpy()
                 if img.shape[-1] != data_dim:
                     img = np.reshape(img, [-1, data_dim])
-                if img.shape != (num_samples, data_dim):
+                num_batch = self.clipto if self.clipto > 0 else num_samples
+                if img.shape != (num_batch, data_dim):
                     if projections is None:
-                        projections = np.empty((data_dim, num_samples))
+                        projections = np.empty((data_dim, num_batch))
                     projections[:, pos:pos+len(img)] = batch_proj.dot(img.T)
                     pos += len(img)
                 else:
@@ -226,7 +237,7 @@ class SketchIterator:
 
 
 def write_sketch(data_loader, output, projectors_class, num_sketches,
-                 num_quantiles):
+                 num_quantiles, clipto):
 
     # load data
     data_dim = int(np.prod(data_loader.dataset[0][0].shape))
@@ -239,7 +250,8 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
     # allocate the sketch variable (quantile function)
     qf = np.array([s for s, p in
                    tqdm.tqdm(SketchIterator(data_loader, projectors, 1,
-                                            num_quantiles, 0, num_sketches))])
+                                            num_quantiles, 0, num_sketches,
+                                            clipto))])
 
     # save sketch
     np.save(output, {'qf': qf,
@@ -282,6 +294,12 @@ def add_sketch_arguments(parser):
                         help="Number of quantiles to compute",
                         type=int,
                         default=100)
+    parser.add_argument("--clip",
+                        help="Number of datapoints used per sketch. If "
+                             "negative, take all of them.",
+                        type=int,
+                        default=-1)
+
     return parser
 
 
@@ -301,7 +319,7 @@ if __name__ == "__main__":
         raise ValueError('Need a dataset argument. Aborting.')
     if args.root_data_dir is None:
         args.root_data_dir = 'data/'+args.dataset
-    data_loader = load_data(args.dataset, None, args.root_data_dir,
+    data_loader = load_data(args.dataset, args.clip, args.root_data_dir,
                             args.img_size, args.memory_usage)
 
     # setting the default value for the output as the dataset name
@@ -315,7 +333,8 @@ if __name__ == "__main__":
 
     write_sketch(data_loader,
                  args.output,
-                 args.projectors, args.num_sketches, args.num_quantiles)
+                 args.projectors, args.num_sketches, args.num_quantiles,
+                 args.clip)
 
     pr.disable()
     pr.dump_stats('sketch_profile.prof')
