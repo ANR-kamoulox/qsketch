@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torchvision import datasets
 from torchvision import transforms
-from torch.utils.data import Dataset, TensorDataset, DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch import Tensor
 from joblib import Parallel, delayed
 import multiprocessing
@@ -15,9 +15,10 @@ import sys
 
 
 class Projectors(Dataset):
-    def __init__(self, size, data_dim):
+    def __init__(self, size, num_thetas, data_dim):
         super(Dataset, self).__init__()
         self.size = size
+        self.num_thetas = num_thetas
         self.data_dim = data_dim
 
     def __len__(self):
@@ -33,10 +34,10 @@ class RandomProjectors(Projectors):
         if isinstance(idx, int):
             idx = [idx]
 
-        result = np.empty((len(idx), self.data_dim, self.data_dim))
+        result = np.empty((len(idx), self.num_thetas, self.data_dim))
         for pos, id in enumerate(idx):
             np.random.seed(id)
-            result[pos] = np.random.randn(self.data_dim, self.data_dim)
+            result[pos] = np.random.randn(self.num_thetas, self.data_dim)
             result[pos] /= (np.linalg.norm(result[pos], axis=1))[:, None]
         return np.squeeze(result)
 
@@ -56,6 +57,9 @@ class RandomLocalizedProjectors(Projectors):
         self.factors = RandomLocalizedProjectors.get_factors(self.data_dim)
 
     def __getitem__(self, idx):
+        if self.num_thetas != self.data_dim:
+            raise ValueError('For random localized projectors, ',
+                             'num_theta=data_dim')
         if isinstance(idx, int):
             idx = [idx]
         result = np.zeros((len(idx), self.data_dim, self.data_dim))
@@ -74,13 +78,12 @@ class RandomLocalizedProjectors(Projectors):
 class UnitaryProjectors(Projectors):
     """Each projector is a unitary basis of the data-space"""
     def __getitem__(self, idx):
-        if self.shape is None:
-            raise ValueError('Projectors must be prepared before use.')
-
+        if self.num_thetas != self.data_dim:
+            raise ValueError('For unitary projectors, num_theta=data_dim')
         if isinstance(idx, int):
             idx = [idx]
 
-        result = np.empty((len(idx), *self.shape))
+        result = np.empty((len(idx), self.data_dim, self.data_dim))
         for pos, id in enumerate(idx):
             np.random.seed(id)
             '''A Random matrix distributed with Haar measure,
@@ -92,7 +95,7 @@ class UnitaryProjectors(Projectors):
                 journal={arXiv preprint math-ph/0609050},
                 year={2006}}
             '''
-            z = np.random.randn(*self.shape)
+            z = np.random.randn(self.data_dim, self.data_dim)
             q, r = np.linalg.qr(z)
             d = np.diagonal(r)
             ph = d/np.absolute(d)
@@ -127,7 +130,6 @@ class OneShotDataLoader(DataLoader):
         else:
             self.done = True
             if self.clipto > 0:
-                #import ipdb; ipdb.set_trace()
                 order = np.random.permutation(self.dataset.data.shape[0])
                 return (self.dataset.data[order[:self.clipto]], None)
             else:
@@ -237,14 +239,14 @@ class SketchIterator:
 
 
 def write_sketch(data_loader, output, projectors_class, num_sketches,
-                 num_quantiles, clipto):
+                 num_thetas, num_quantiles, clipto):
 
     # load data
     data_dim = int(np.prod(data_loader.dataset[0][0].shape))
 
     # prepare the projectors
     ProjectorsClass = getattr(sys.modules[__name__], projectors_class)
-    projectors = ProjectorsClass(args.num_sketches, data_dim)
+    projectors = ProjectorsClass(args.num_sketches, num_thetas, data_dim)
 
     print('Sketching the data')
     # allocate the sketch variable (quantile function)
@@ -254,7 +256,7 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
                                             clipto))])
 
     # save sketch
-    np.save(output, {'qf': qf,
+    np.save(output, {'qf': qf, 'data_dim': data_dim,
                      'projectors_class': projectors.__class__.__name__})
 
 
@@ -285,9 +287,12 @@ def add_sketch_arguments(parser):
                         help="Type of projectors, must be of the classes "
                              "overriding Projectors.",
                         default="RandomProjectors")
+    parser.add_argument("--num_thetas",
+                        help="Number of thetas per sketch.",
+                        type=int,
+                        default=50)
     parser.add_argument("--num_sketches",
-                        help="Number of sketches. Each sketch gets a number "
-                             "thetas equal to the data dimension.",
+                        help="Number of sketches.",
                         type=int,
                         default=400)
     parser.add_argument("--num_quantiles",
@@ -333,8 +338,8 @@ if __name__ == "__main__":
 
     write_sketch(data_loader,
                  args.output,
-                 args.projectors, args.num_sketches, args.num_quantiles,
-                 args.clip)
+                 args.projectors, args.num_sketches, args.num_thetas,
+                 args.num_quantiles, args.clip)
 
     pr.disable()
     pr.dump_stats('sketch_profile.prof')
