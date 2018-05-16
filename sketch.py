@@ -51,27 +51,35 @@ class RandomLocalizedProjectors(Projectors):
                          ([i, int(n//i)] for i in range(1, int(n**0.5) + 1)
                           if not n % i)))[1:]
 
-    def __init__(self, size, data_dim):
+    def __init__(self, size, num_thetas, data_dim):
         print('Initializing localized projectors')
-        super(RandomLocalizedProjectors, self).__init__(size, data_dim)
-        self.factors = RandomLocalizedProjectors.get_factors(self.data_dim)
+        super(RandomLocalizedProjectors, self).__init__(size, num_thetas,
+                                                        data_dim)
+        self.factors = [v for v in
+                        RandomLocalizedProjectors.get_factors(self.data_dim)
+                        if v > num_thetas]
 
     def __getitem__(self, idx):
-        if self.num_thetas != self.data_dim:
-            raise ValueError('For random localized projectors, ',
-                             'num_theta=data_dim')
         if isinstance(idx, int):
             idx = [idx]
-        result = np.zeros((len(idx), self.data_dim, self.data_dim))
+        result = np.zeros((len(idx), self.num_thetas, self.data_dim))
         for pos, id in enumerate(idx):
             # generate each set of projectors
             np.random.seed(id)
+            if not id % 2:
+                result[pos] = np.random.randn(self.num_thetas, self.data_dim)
+                result[pos] /= (np.linalg.norm(result[pos], axis=1))[:, None]
+
+            rtemp = np.zeros((self.data_dim, self.data_dim))
             size_patches = np.random.choice(self.factors)
             short_matrix = np.random.randn(self.data_dim, size_patches)
             short_matrix /= (np.linalg.norm(short_matrix, axis=1))[:, None]
             for k in range(int(self.data_dim/size_patches)):
                 indices = slice(k*size_patches, (k+1)*size_patches)
-                result[pos, indices, indices] = short_matrix[indices, :]
+                rtemp[indices, indices] = short_matrix[indices, :]
+            subset = np.random.choice(self.data_dim, self.num_thetas,
+                                      replace=False)
+            result[pos] = rtemp[subset]
         return np.squeeze(result)
 
 
