@@ -139,7 +139,6 @@ class OneShotDataLoader(DataLoader):
 def load_data(dataset, clipto,
               data_dir="data", img_size=None, memory_usage=2):
     # Data loading
-    print('Loading data')
     if os.path.exists(dataset):
         # this is a ndarray saved by numpy.save. Just dataset and clipto are
         # useful
@@ -234,6 +233,24 @@ class SketchIterator:
                 else:
                     projections = batch_proj.dot(img.T)
 
+                """
+                code for plotting the data, whene it's a mono image
+                from torchvision.utils import save_image, make_grid
+                samples = img
+                [num_samples, data_dim] = samples.shape
+                import ipdb; ipdb.set_trace()
+                samples = samples[:min(208, num_samples)]
+                num_samples = samples.shape[0]
+
+                imsize = int(np.sqrt(data_dim))
+                samples = np.reshape(samples,
+                                     [num_samples, 1, imsize,imsize])
+                pic = make_grid(torch.Tensor(samples),
+                                nrow=8, padding=2, normalize=True, scale_each=True)
+                save_image(pic, 'dataset_example.png')
+                import ipdb; ipdb.set_trace()"""
+
+
             # compute the quantiles for each of these projections
             return fast_percentile(projections, self.quantiles), batch_proj
 
@@ -320,8 +337,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # parsing the dataset parameters and getting the data loader
-    if args.dataset is None:
-        raise ValueError('Need a dataset argument. Aborting.')
     if args.root_data_dir is None:
         args.root_data_dir = 'data/'+args.dataset
     data_loader = load_data(args.dataset, args.clip, args.root_data_dir,
@@ -332,14 +347,7 @@ if __name__ == "__main__":
         args.output = 'sketch_' + args.dataset
 
     # launch sketching
-    import cProfile
-    pr = cProfile.Profile()
-    pr.enable()
-
     write_sketch(data_loader,
                  args.output,
                  args.projectors, args.num_sketches, args.num_thetas,
                  args.num_quantiles, args.clip)
-
-    pr.disable()
-    pr.dump_stats('sketch_profile.prof')
