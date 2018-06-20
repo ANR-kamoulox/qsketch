@@ -270,6 +270,7 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
                  num_thetas, num_quantiles, clipto):
 
     # load data
+    print('coincoin')
     data_shape = data_loader.dataset[0][0].shape
 
     # prepare the projectors
