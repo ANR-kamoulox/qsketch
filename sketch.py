@@ -4,7 +4,6 @@ import torch
 from torchvision import datasets
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
-from torch import Tensor
 from joblib import Parallel, delayed
 import multiprocessing
 from functools import reduce
@@ -30,10 +29,13 @@ class Projectors(Dataset):
 
 class RandomProjectors(Projectors):
     """Each projector is a set of unit-length random vectors"""
+    def __init__(self, size, num_thetas, data_shape):
+        super(RandomProjectors, self).__init__(size, num_thetas,
+                                               data_shape)
+
     def __getitem__(self, idx):
         if isinstance(idx, int):
             idx = [idx]
-
         result = np.empty((len(idx), self.num_thetas, self.data_dim))
         for pos, id in enumerate(idx):
             np.random.seed(id)
@@ -270,7 +272,6 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
                  num_thetas, num_quantiles, clipto):
 
     # load data
-    print('coincoin')
     data_shape = data_loader.dataset[0][0].shape
 
     # prepare the projectors
