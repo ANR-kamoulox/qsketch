@@ -15,11 +15,11 @@ import sys
 
 
 class Projectors(Dataset):
-    def __init__(self, size, num_thetas, data_dim):
+    def __init__(self, size, num_thetas, data_shape):
         super(Dataset, self).__init__()
         self.size = size
         self.num_thetas = num_thetas
-        self.data_dim = data_dim
+        self.data_dim = np.prod(np.array(data_shape))
 
     def __len__(self):
         return self.size
@@ -51,10 +51,10 @@ class RandomLocalizedProjectors(Projectors):
                          ([i, int(n//i)] for i in range(1, int(n**0.5) + 1)
                           if not n % i)))[1:]
 
-    def __init__(self, size, num_thetas, data_dim):
+    def __init__(self, size, num_thetas, data_shape):
         print('Initializing localized projectors')
         super(RandomLocalizedProjectors, self).__init__(size, num_thetas,
-                                                        data_dim)
+                                                        data_shape)
         self.factors = [v for v in
                         RandomLocalizedProjectors.get_factors(self.data_dim)
                         if v > num_thetas]
@@ -139,7 +139,7 @@ class OneShotDataLoader(DataLoader):
             self.done = True
             if self.clipto > 0:
                 order = np.random.permutation(self.dataset.data.shape[0])
-                return (self.dataset.data[order[:self.clipto]], None)
+                return (self.dataset.data[order[:self.clipto], ...], None)
             else:
                 return (self.dataset.data, None)
 
@@ -162,7 +162,8 @@ def load_data(dataset, clipto,
                 transforms.ToTensor()])
         data = DATASET(data_dir, train=True, download=True,
                        transform=transform)
-        data_dim = int(np.prod(data[0][0].size()))
+        data_shape = data[0][0].size()
+        data_dim = int(np.prod(data_shape))
 
         # computing batch size, that fits in memory
         data_bytes = data_dim * data[0][0].element_size()
@@ -175,7 +176,9 @@ def load_data(dataset, clipto,
             data_loader = torch.utils.data.DataLoader(data,
                                                       batch_size=nimg_batch)
             for img, labels in data_loader:
-                imgs_npy = torch.Tensor(img).view(-1, data_dim).numpy()
+                #imgs_npy = torch.Tensor(img).view(-1, data_dim).numpy()
+                imgs_npy = torch.Tensor(img).numpy()
+
             npy_dataset = NumpyDataset(imgs_npy)
             data_loader = OneShotDataLoader(npy_dataset, clipto)
         else:
@@ -222,7 +225,8 @@ class SketchIterator:
 
             # loop over the data
             num_samples = len(self.dataloader.dataset)
-            data_dim = int(np.prod(self.dataloader.dataset[0][0].shape))
+            data_shape = self.dataloader.dataset[0][0].shape
+            data_dim = int(np.prod(data_shape))
 
             pos = 0
             projections = None
@@ -242,7 +246,7 @@ class SketchIterator:
                     projections = batch_proj.dot(img.T)
 
                 """
-                code for plotting the data, whene it's a mono image
+                code for plotting the data, when it's a mono image
                 from torchvision.utils import save_image, make_grid
                 samples = img
                 [num_samples, data_dim] = samples.shape
@@ -258,7 +262,6 @@ class SketchIterator:
                 save_image(pic, 'dataset_example.png')
                 import ipdb; ipdb.set_trace()"""
 
-
             # compute the quantiles for each of these projections
             return fast_percentile(projections, self.quantiles), batch_proj
 
@@ -267,11 +270,11 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
                  num_thetas, num_quantiles, clipto):
 
     # load data
-    data_dim = int(np.prod(data_loader.dataset[0][0].shape))
+    data_shape = data_loader.dataset[0][0].shape
 
     # prepare the projectors
     ProjectorsClass = getattr(sys.modules[__name__], projectors_class)
-    projectors = ProjectorsClass(args.num_sketches, num_thetas, data_dim)
+    projectors = ProjectorsClass(args.num_sketches, num_thetas, data_shape)
 
     print('Sketching the data')
     # allocate the sketch variable (quantile function)
@@ -281,7 +284,7 @@ def write_sketch(data_loader, output, projectors_class, num_sketches,
                                             clipto))])
 
     # save sketch
-    np.save(output, {'qf': qf, 'data_dim': data_dim,
+    np.save(output, {'qf': qf, 'data_shape': data_shape,
                      'projectors_class': projectors.__class__.__name__})
 
 
@@ -289,7 +292,7 @@ def add_data_arguments(parser):
     parser.add_argument("dataset",
                         help="either a file saved by numpy.save "
                              "containing a ndarray of shape "
-                             "num_samples x data_dim, or the name "
+                             "(num_samples,)+data_shape, or the name "
                              "of the dataset to sketch, which "
                              "must be one of those supported in "
                              "torchvision.datasets")
