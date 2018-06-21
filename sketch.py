@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torchvision import datasets
 from torchvision import transforms
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, TensorDataset, DataLoader
 from joblib import Parallel, delayed
 import multiprocessing
 from functools import reduce
@@ -20,6 +20,7 @@ class Projectors(Dataset):
         self.size = size
         self.num_thetas = num_thetas
         self.data_dim = np.prod(np.array(data_shape))
+        self.device = "cpu"
 
     def __len__(self):
         return self.size
@@ -27,9 +28,12 @@ class Projectors(Dataset):
     def __getitem__(self, idx):
         pass
 
+    def set_device(self, device):
+        self.device = device
+
 
 class RandomProjectors(Projectors):
-    """Each projector is a set of unit-length random vectors"""
+    """Each projector is a set of unit-length random vector"""
     def __init__(self, size, num_thetas, data_shape):
         super(RandomProjectors, self).__init__(size, num_thetas,
                                                data_shape)
@@ -37,12 +41,14 @@ class RandomProjectors(Projectors):
     def __getitem__(self, idx):
         if isinstance(idx, int):
             idx = [idx]
-        result = np.empty((len(idx), self.num_thetas, self.data_dim))
+        result = torch.empty((len(idx), self.num_thetas, self.data_dim),
+                             device=self.device)
         for pos, id in enumerate(idx):
-            np.random.seed(id)
-            result[pos] = np.random.randn(self.num_thetas, self.data_dim)
-            result[pos] /= (np.linalg.norm(result[pos], axis=1))[:, None]
-        return np.squeeze(result)
+            torch.manual_seed(id)
+            result[pos] = torch.randn(self.num_thetas, self.data_dim,
+                                      device=self.device)
+            result[pos] /= (torch.norm(result[pos], dim=1, keepdim=True))
+        return torch.squeeze(result)
 
 
 class RandomLocalizedProjectors(Projectors):
@@ -114,49 +120,16 @@ class UnitaryProjectors(Projectors):
         return np.squeeze(result)
 
 
-class NumpyDataset(Dataset):
-    def __init__(self, array):
-        self.data = array
-
-    def __len__(self):
-        return self.data.shape[0]
-
-    def __getitem__(self, idx):
-        return (self.data[idx], None)
-
-
-class OneShotDataLoader(DataLoader):
-    def __init__(self, dataset, clipto):
-        self.dataset = dataset
-        self.done = False
-        self.clipto = clipto
-
-    def __iter__(self):
-        self.done = False
-        return self
-
-    def __next__(self):
-        if self.done:
-            raise StopIteration
-        else:
-            self.done = True
-            if self.clipto > 0:
-                order = np.random.permutation(self.dataset.data.shape[0])
-                return (self.dataset.data[order[:self.clipto], ...], None)
-            else:
-                return (self.dataset.data, None)
-
-
 def load_data(dataset, clipto,
-              data_dir="data", img_size=None, memory_usage=2):
-    # Data loading
+              data_dir="data", img_size=None, memory_usage=2, use_cuda=False):
+    kwargs = {
+        'num_workers': 1, 'pin_memory': True
+    } if use_cuda else {'num_workers': 4}
+
     if os.path.exists(dataset):
-        # this is a ndarray saved by numpy.save. Just dataset and clipto are
-        # useful
-        imgs_npy = np.load(dataset)
-        num_samples = imgs_npy.shape[0]
-        npy_dataset = NumpyDataset(imgs_npy)
-        data_loader = OneShotDataLoader(npy_dataset, clipto)
+        # this is a ndarray saved by numpy.save
+        imgs = torch.tensor(np.load(dataset))
+        data = TensorDataset(imgs, torch.zeros(imgs.shape[0]), **kwargs)
     else:
         # this is a torchvision dataset
         DATASET = getattr(datasets, dataset)
@@ -165,37 +138,28 @@ def load_data(dataset, clipto,
                 transforms.ToTensor()])
         data = DATASET(data_dir, train=True, download=True,
                        transform=transform)
-        data_shape = data[0][0].size()
-        data_dim = int(np.prod(data_shape))
 
-        # computing batch size, that fits in memory
-        data_bytes = data_dim * data[0][0].element_size()
-        nimg_batch = int(memory_usage*2**30 / data_bytes)
-        num_samples = len(data)
-        nimg_batch = max(1, min(nimg_batch, num_samples))
+    data_shape = data[0][0].size()
+    data_dim = int(np.prod(data_shape))
 
-        if nimg_batch == num_samples:
-            # Everything fits into memory: load only once
-            data_loader = torch.utils.data.DataLoader(data,
-                                                      batch_size=nimg_batch)
-            for img, labels in data_loader:
-                #imgs_npy = torch.Tensor(img).view(-1, data_dim).numpy()
-                imgs_npy = torch.Tensor(img).numpy()
+    # computing batch size, that fits in memory
+    data_bytes = data_dim * data[0][0].element_size()
+    nimg_batch = int(memory_usage*2**30 / data_bytes)
+    num_samples = len(data)
+    nimg_batch = max(1, min(nimg_batch, num_samples))
 
-            npy_dataset = NumpyDataset(imgs_npy)
-            data_loader = OneShotDataLoader(npy_dataset, clipto)
-        else:
-            data_loader = torch.utils.data.DataLoader(data, batch_size=clipto)
-
+    batch_size = clipto if clipto > 0 else nimg_batch
+    data_loader = torch.utils.data.DataLoader(data,
+                                              batch_size=batch_size)
     return data_loader
 
 
 def fast_percentile(V, quantiles):
     if V.shape[1] < 10000:
-        return np.percentile(V, quantiles, axis=1).T
+        return np.percentile(V.detach(), quantiles, axis=1).T
     return np.array(Parallel(n_jobs=multiprocessing.cpu_count()-1)
                     (delayed(np.percentile)(v, quantiles)
-                     for v in V))
+                     for v in V.detach()))
 
 
 class SketchIterator:
@@ -204,6 +168,7 @@ class SketchIterator:
                  start, stop=-1, clipto=-1):
         self.dataloader = dataloader
         self.projectors = projectors
+        self.num_quantiles = num_quantiles
         self.quantiles = np.linspace(0, 100, num_quantiles)
         self.start = start
         self.stop = stop if stop >= 0 else None
@@ -220,7 +185,6 @@ class SketchIterator:
         if self.stop is not None and (self.current >= self.stop):
             raise StopIteration
         else:
-            #   import ipdb; ipdb.set_trace()
             batch_proj = self.projectors[range(self.current,
                                          self.current+self.batch_size)]
             self.current += self.batch_size
@@ -235,18 +199,19 @@ class SketchIterator:
             projections = None
             for index, (img, labels) in enumerate(self.dataloader):
                 # load img numpy data
-                if isinstance(img, torch.Tensor):
-                    img = torch.Tensor(img).numpy()
+                if isinstance(img, np.ndarray):
+                    img = torch.tensor(img, device=self.projectors.device)
                 if img.shape[-1] != data_dim:
-                    img = np.reshape(img, [-1, data_dim])
+                    img = img.view([-1, data_dim])
                 num_batch = self.clipto if self.clipto > 0 else num_samples
                 if img.shape != (num_batch, data_dim):
                     if projections is None:
-                        projections = np.empty((data_dim, num_batch))
-                    projections[:, pos:pos+len(img)] = batch_proj.dot(img.T)
+                        projections = torch.empty((data_dim, num_batch))
+                    projections[:, pos:pos+len(img)] = \
+                        torch.mm(batch_proj, img.transpose(0, 1))
                     pos += len(img)
                 else:
-                    projections = batch_proj.dot(img.T)
+                    projections = torch.mm(batch_proj, img.transpose(0, 1))
 
                 """
                 code for plotting the data, when it's a mono image
