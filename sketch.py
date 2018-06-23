@@ -5,6 +5,7 @@ from torchvision import datasets
 from torchvision import transforms
 from torch.utils.data import Dataset, TensorDataset, DataLoader
 from joblib import Parallel, delayed
+from .autograd_percentile import Percentile
 import multiprocessing
 from functools import reduce
 import tqdm
@@ -19,6 +20,7 @@ class Projectors(Dataset):
         super(Dataset, self).__init__()
         self.size = size
         self.num_thetas = num_thetas
+        self.data_shape = data_shape
         self.data_dim = np.prod(np.array(data_shape))
         self.device = "cpu"
 
@@ -150,26 +152,19 @@ def load_data(dataset, clipto,
 
     batch_size = clipto if clipto > 0 else nimg_batch
     data_loader = torch.utils.data.DataLoader(data,
-                                              batch_size=batch_size)
+                                              batch_size=batch_size, **kwargs)
     return data_loader
-
-
-def fast_percentile(V, quantiles):
-    if V.shape[1] < 10000:
-        return np.percentile(V.detach(), quantiles, axis=1).T
-    return np.array(Parallel(n_jobs=multiprocessing.cpu_count()-1)
-                    (delayed(np.percentile)(v, quantiles)
-                     for v in V.detach()))
 
 
 class SketchIterator:
     def __init__(self,
                  dataloader, projectors, batch_size, num_quantiles,
-                 start, stop=-1, clipto=-1):
+                 start, stop, clipto, device):
+        self.device = device
         self.dataloader = dataloader
         self.projectors = projectors
         self.num_quantiles = num_quantiles
-        self.quantiles = np.linspace(0, 100, num_quantiles)
+        self.quantiles = torch.linspace(0, 100, num_quantiles)
         self.start = start
         self.stop = stop if stop >= 0 else None
         self.current = start
@@ -177,6 +172,7 @@ class SketchIterator:
         self.num_samples_per_batch = (clipto if clipto > 0
                                       else len(self.dataloader.dataset))
         self.clipto = clipto
+        self.percentile_fn = Percentile(num_quantiles, device)
 
     def __iter__(self):
         return self
@@ -188,50 +184,31 @@ class SketchIterator:
             batch_proj = self.projectors[range(self.current,
                                          self.current+self.batch_size)]
             self.current += self.batch_size
-            batch_proj = np.reshape(batch_proj, [-1, self.projectors.data_dim])
+            batch_proj = batch_proj.view([-1, self.projectors.data_dim])
 
             # loop over the data
             num_samples = len(self.dataloader.dataset)
-            data_shape = self.dataloader.dataset[0][0].shape
-            data_dim = int(np.prod(data_shape))
 
             pos = 0
             projections = None
             for index, (img, labels) in enumerate(self.dataloader):
-                # load img numpy data
-                if isinstance(img, np.ndarray):
-                    img = torch.tensor(img, device=self.projectors.device)
-                if img.shape[-1] != data_dim:
-                    img = img.view([-1, data_dim])
+                img = img.to(self.device)
+                if img.shape[-1] != self.projectors.data_dim:
+                    img = img.view([-1, self.projectors.data_dim])
                 num_batch = self.clipto if self.clipto > 0 else num_samples
-                if img.shape != (num_batch, data_dim):
+                if img.shape != (num_batch, self.projectors.data_dim):
                     if projections is None:
-                        projections = torch.empty((data_dim, num_batch))
+                        projections = torch.empty((self.projectors.data_dim,
+                                                   num_batch),
+                                                  device=self.device)
                     projections[:, pos:pos+len(img)] = \
                         torch.mm(batch_proj, img.transpose(0, 1))
                     pos += len(img)
                 else:
                     projections = torch.mm(batch_proj, img.transpose(0, 1))
 
-                """
-                code for plotting the data, when it's a mono image
-                from torchvision.utils import save_image, make_grid
-                samples = img
-                [num_samples, data_dim] = samples.shape
-                import ipdb; ipdb.set_trace()
-                samples = samples[:min(208, num_samples)]
-                num_samples = samples.shape[0]
-
-                imsize = int(np.sqrt(data_dim))
-                samples = np.reshape(samples,
-                                     [num_samples, 1, imsize,imsize])
-                pic = make_grid(torch.Tensor(samples),
-                                nrow=8, padding=2, normalize=True, scale_each=True)
-                save_image(pic, 'dataset_example.png')
-                import ipdb; ipdb.set_trace()"""
-
             # compute the quantiles for each of these projections
-            return fast_percentile(projections, self.quantiles), batch_proj
+            return self.percentile_fn(projections), batch_proj
 
 
 def write_sketch(data_loader, output, projectors_class, num_sketches,
