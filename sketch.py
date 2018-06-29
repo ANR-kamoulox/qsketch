@@ -3,10 +3,11 @@ import numpy as np
 import torch
 from torchvision import datasets
 from torchvision import transforms
-from torch.utils.data import Dataset, TensorDataset, DataLoader
-from joblib import Parallel, delayed
+from torch.utils.data import Dataset, TensorDataset, DataLoader,
+                             RandomSampler, Sampler
 from .autograd_percentile import Percentile
 import multiprocessing
+from .celeba import CelebA
 from functools import reduce
 import tqdm
 import argparse
@@ -14,31 +15,15 @@ import os
 import sys
 
 
-
-class Projectors(Dataset):
+class Projectors(Projectors):
+    """Each projector is a set of unit-length random vector"""
     def __init__(self, size, num_thetas, data_shape):
-        super(Dataset, self).__init__()
+        super(Projectors, self).__init__()
         self.size = size
         self.num_thetas = num_thetas
         self.data_shape = data_shape
         self.data_dim = np.prod(np.array(data_shape))
         self.device = "cpu"
-
-    def __len__(self):
-        return self.size
-
-    def __getitem__(self, idx):
-        pass
-
-    def set_device(self, device):
-        self.device = device
-
-
-class RandomProjectors(Projectors):
-    """Each projector is a set of unit-length random vector"""
-    def __init__(self, size, num_thetas, data_shape):
-        super(RandomProjectors, self).__init__(size, num_thetas,
-                                               data_shape)
 
     def __getitem__(self, idx):
         if isinstance(idx, int):
@@ -52,107 +37,73 @@ class RandomProjectors(Projectors):
             result[pos] /= (torch.norm(result[pos], dim=1, keepdim=True))
         return torch.squeeze(result)
 
+class DynamicSubsetRandomSampler(Sampler):
+    r"""Samples a given number of elements randomly, from a given amount
+    of indices, with replacement.
 
-class RandomLocalizedProjectors(Projectors):
-    """Each projector is a set of unit-length random vectors, that are
-    active only in neighbourhoods of the data"""
-    @staticmethod
-    def get_factors(n):
-        return np.unique(reduce(list.__add__,
-                         ([i, int(n//i)] for i in range(1, int(n**0.5) + 1)
-                          if not n % i)))[1:]
+    Arguments:
+        data_source (Dataset): elements to sample from
+        nb_items (int): number of samples to draw
+    """
 
-    def __init__(self, size, num_thetas, data_shape):
-        print('Initializing localized projectors')
-        super(RandomLocalizedProjectors, self).__init__(size, num_thetas,
-                                                        data_shape)
-        self.factors = [v for v in
-                        RandomLocalizedProjectors.get_factors(self.data_dim)
-                        if v > num_thetas]
+    def __init__(self, indices):
+        self.data_source = data_source
+        self.nb_items = nb_items
+        self.indices = None
+        self.update()
 
-    def __getitem__(self, idx):
-        if isinstance(idx, int):
-            idx = [idx]
-        result = np.zeros((len(idx), self.num_thetas, self.data_dim))
-        for pos, id in enumerate(idx):
-            # generate each set of projectors
-            np.random.seed(id)
-            if not id % 2:
-                result[pos] = np.random.randn(self.num_thetas, self.data_dim)
-                result[pos] /= (np.linalg.norm(result[pos], axis=1))[:, None]
+    def __iter__(self):
+        return (self.indices[i] for i in torch.randperm(len(self.indices)))
 
-            rtemp = np.zeros((self.data_dim, self.data_dim))
-            size_patches = np.random.choice(self.factors)
-            short_matrix = np.random.randn(self.data_dim, size_patches)
-            short_matrix /= (np.linalg.norm(short_matrix, axis=1))[:, None]
-            for k in range(int(self.data_dim/size_patches)):
-                indices = slice(k*size_patches, (k+1)*size_patches)
-                rtemp[indices, indices] = short_matrix[indices, :]
-            subset = np.random.choice(self.data_dim, self.num_thetas,
-                                      replace=False)
-            result[pos] = rtemp[subset]
-        return np.squeeze(result)
+    def __len__(self):
+        return self.nb_items
+
+    def udate(self):
+        self.indices = list(np.random.randint(low=0, high=len(self.data_source),
+                                              size=self.nb_items))
 
 
-class UnitaryProjectors(Projectors):
-    """Each projector is a unitary basis of the data-space"""
-    def __getitem__(self, idx):
-        if self.num_thetas != self.data_dim:
-            raise ValueError('For unitary projectors, num_theta=data_dim')
-        if isinstance(idx, int):
-            idx = [idx]
 
-        result = np.empty((len(idx), self.data_dim, self.data_dim))
-        for pos, id in enumerate(idx):
-            np.random.seed(id)
-            '''A Random matrix distributed with Haar measure,
-            From Francesco Mezzadri:
-            @article{mezzadri2006generate,
-                title={How to generate random matrices from the
-                classical compact groups},
-                author={Mezzadri, Francesco},
-                journal={arXiv preprint math-ph/0609050},
-                year={2006}}
-            '''
-            z = np.random.randn(self.data_dim, self.data_dim)
-            q, r = np.linalg.qr(z)
-            d = np.diagonal(r)
-            ph = d/np.absolute(d)
-            result[pos] = np.multiply(q, ph, q)
-        return np.squeeze(result)
-
-
-def load_data(dataset, clipto,
-              data_dir="data", img_size=None, memory_usage=2, use_cuda=False):
+def load_data(dataset, data_dir="data", img_size=None,
+              clipto=None, batchsize=64, use_cuda=False):
     kwargs = {
         'num_workers': 1, 'pin_memory': True
-    } if use_cuda else {'num_workers': 4}
+    } if use_cuda else {'num_workers': multiprocessing.cpu_count()-1}
 
-    if os.path.exists(dataset):
-        # this is a ndarray saved by numpy.save
+    # First load the DataSet
+    if os.path.isfile(dataset):
+        # this is a file, and hence should be a ndarray saved by numpy.save
         imgs = torch.tensor(np.load(dataset))
         data = TensorDataset(imgs, torch.zeros(imgs.shape[0]), **kwargs)
     else:
-        # this is a torchvision dataset
-        DATASET = getattr(datasets, dataset)
+        # this is not a file. In this case, there will be a DataSet class to
+        # handle it.
+
+        # first define the transforms
         transform = transforms.Compose([
                 transforms.Resize(img_size),
                 transforms.ToTensor()])
-        data = DATASET(data_dir, train=True, download=True,
-                       transform=transform)
 
-    data_shape = data[0][0].size()
-    data_dim = int(np.prod(data_shape))
+        # If it's a dir and is celebA, then we have a special loader
+        if os.path.isdir(dataset):
+            if os.path.basename(dataset).upper() == "CELEBA":
+                data = CelebA(dataset, transform, mode="train")
+        else:
+            # Just assume it's a torchvision dataset
+            DATASET = getattr(datasets, dataset)
+            data = DATASET(data_dir, train=True, download=True,
+                           transform=transform)
 
-    # computing batch size, that fits in memory
-    data_bytes = data_dim * data[0][0].element_size()
-    nimg_batch = int(memory_usage*2**30 / data_bytes)
-    num_samples = len(data)
-    nimg_batch = max(1, min(nimg_batch, num_samples))
+    # Now get a dataloader
+    if clipto < 0:
+        sampler = DynamicSubsetRandomSampler(data, len(data))
+    else:
+        sampler = DynamicSubsetRandomSampler(data, clipto)
 
-    batch_size = clipto if clipto > 0 else nimg_batch
     data_loader = torch.utils.data.DataLoader(data,
-                                              batch_size=batch_size, **kwargs)
+                                              sampler=sampler
+                                              batch_size=batch_size,
+                                              **kwargs)
     return data_loader
 
 
@@ -211,36 +162,14 @@ class SketchIterator:
             return self.percentile_fn(projections), batch_proj
 
 
-def write_sketch(data_loader, output, projectors_class, num_sketches,
-                 num_thetas, num_quantiles, clipto):
-
-    # load data
-    data_shape = data_loader.dataset[0][0].shape
-
-    # prepare the projectors
-    ProjectorsClass = getattr(sys.modules[__name__], projectors_class)
-    projectors = ProjectorsClass(args.num_sketches, num_thetas, data_shape)
-
-    print('Sketching the data')
-    # allocate the sketch variable (quantile function)
-    qf = np.array([s for s, p in
-                   tqdm.tqdm(SketchIterator(data_loader, projectors, 1,
-                                            num_quantiles, 0, num_sketches,
-                                            clipto))])
-
-    # save sketch
-    np.save(output, {'qf': qf, 'data_shape': data_shape,
-                     'projectors_class': projectors.__class__.__name__})
-
-
 def add_data_arguments(parser):
     parser.add_argument("dataset",
-                        help="either a file saved by numpy.save "
+                        help="either: i/ a file saved by numpy.save "
                              "containing a ndarray of shape "
-                             "(num_samples,)+data_shape, or the name "
-                             "of the dataset to sketch, which "
-                             "must be one of those supported in "
-                             "torchvision.datasets")
+                             "(num_samples,)+data_shape, or ii/ the path "
+                             "to the celebA directory (that must end with
+                             "`CelebA` or iii/ the name of one of the "
+                             "datasets in torchvision.datasets")
     parser.add_argument("--img_size",
                         help="Images are resized as s x s",
                         type=int,
@@ -272,38 +201,10 @@ def add_sketch_arguments(parser):
                         help="Number of quantiles to compute",
                         type=int,
                         default=100)
-    parser.add_argument("--clip",
+    parser.add_argument("--clipto",
                         help="Number of datapoints used per sketch. If "
                              "negative, take all of them.",
                         type=int,
                         default=-1)
 
     return parser
-
-
-if __name__ == "__main__":
-    # parse arguments
-    parser = argparse.ArgumentParser(description=
-                                     'Sketch a torchvision dataset or a '
-                                     'ndarray saved on disk.')
-    parser = add_data_arguments(parser)
-    parser = add_sketch_arguments(parser)
-    parser.add_argument("--output",
-                        help="Output file, defaults to the `dataset` argument")
-    args = parser.parse_args()
-
-    # parsing the dataset parameters and getting the data loader
-    if args.root_data_dir is None:
-        args.root_data_dir = 'data/'+args.dataset
-    data_loader = load_data(args.dataset, args.clip, args.root_data_dir,
-                            args.img_size, args.memory_usage)
-
-    # setting the default value for the output as the dataset name
-    if args.output is None:
-        args.output = 'sketch_' + args.dataset
-
-    # launch sketching
-    write_sketch(data_loader,
-                 args.output,
-                 args.projectors, args.num_sketches, args.num_thetas,
-                 args.num_quantiles, args.clip)
