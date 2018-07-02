@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torchvision import datasets
 from torchvision import transforms
-from torch.utils.data import Dataset, TensorDataset, DataLoader,
+from torch.utils.data import Dataset, TensorDataset, DataLoader, \
                              RandomSampler, Sampler
 from .autograd_percentile import Percentile
 import multiprocessing
@@ -37,6 +37,7 @@ class Projectors(Projectors):
             result[pos] /= (torch.norm(result[pos], dim=1, keepdim=True))
         return torch.squeeze(result)
 
+
 class DynamicSubsetRandomSampler(Sampler):
     r"""Samples a given number of elements randomly, from a given amount
     of indices, with replacement.
@@ -46,22 +47,17 @@ class DynamicSubsetRandomSampler(Sampler):
         nb_items (int): number of samples to draw
     """
 
-    def __init__(self, indices):
+    def __init__(self, nb_items):
         self.data_source = data_source
         self.nb_items = nb_items
-        self.indices = None
         self.update()
 
     def __iter__(self):
-        return (self.indices[i] for i in torch.randperm(len(self.indices)))
+        return list(np.random.randint(low=0, high=len(self.data_source),
+                                      size=self.nb_items))
 
     def __len__(self):
         return self.nb_items
-
-    def udate(self):
-        self.indices = list(np.random.randint(low=0, high=len(self.data_source),
-                                              size=self.nb_items))
-
 
 
 def load_data(dataset, data_dir="data", img_size=None,
@@ -95,13 +91,10 @@ def load_data(dataset, data_dir="data", img_size=None,
                            transform=transform)
 
     # Now get a dataloader
-    if clipto < 0:
-        sampler = DynamicSubsetRandomSampler(data, len(data))
-    else:
-        sampler = DynamicSubsetRandomSampler(data, clipto)
-
+    nb_items = len(data) if clipto < 0 else clipto
+    sampler = DynamicSubsetRandomSampler(data, nb_items)
     data_loader = torch.utils.data.DataLoader(data,
-                                              sampler=sampler
+                                              sampler=sampler,
                                               batch_size=batch_size,
                                               **kwargs)
     return data_loader
