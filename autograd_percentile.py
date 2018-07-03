@@ -56,17 +56,7 @@ class Percentile(torch.autograd.Function):
 
     def forward(self, input):
         """
-        In the forward pass we receive a Tensor containing the input and return
-        a Tensor containing the output.
-        """
-        """
         Find the percentile of a list of values.
-
-        @parameter N - is a list of values. Note N MUST BE already sorted.
-        @parameter percent - a float value from 0.0 to 1.0.
-        @parameter key - optional key function to compute value from each element of N.
-
-        @return - the percentile of the values
         """
         in_sorted, in_argsort = torch.sort(input, dim=1)
         positions = self.percentiles * (input.shape[1]-1) / 100
