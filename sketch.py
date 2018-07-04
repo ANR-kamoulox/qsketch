@@ -120,14 +120,14 @@ class Sketcher(Dataset):
         self.num_quantiles = num_quantiles
         self.requires_grad = requires_grad
         self.device = "cpu"
-        self.current = np.random.randint(0,10000,1)
+        self.current = np.random.randint(0, 10000, 1)
 
     def __iter__(self):
         return self
 
     def __next__(self):
         self.current += 1
-        return self.__getitem__(self.current -1)
+        return self.__getitem__(self.current - 1)
 
     def __getitem__(self, index):
         """import os
@@ -148,7 +148,7 @@ class Sketcher(Dataset):
             # get a batch of images and send it to device
             imgs = imgs.to(device)
 
-            #if required, flatten each sample
+            # if required, flatten each sample
             if imgs.shape[-1] != self.projectors.data_dim:
                 imgs = imgs.view([-1, self.projectors.data_dim])
 
@@ -158,7 +158,8 @@ class Sketcher(Dataset):
             pos += len(imgs)
 
         # compute the quantiles for these projections
-        return Percentile(self.num_quantiles, device)(projections), projector
+        return (Percentile(self.num_quantiles, device)(projections).float(),
+                projector)
 
 
 def add_data_arguments(parser):
