@@ -14,6 +14,7 @@ import tqdm
 import argparse
 import os
 import sys
+from math import floor
 
 
 class Projectors:
@@ -57,7 +58,7 @@ class DynamicSubsetRandomSampler(Sampler):
 
     def __iter__(self):
         return iter(list(np.random.randint(low=0, high=len(self.data_source),
-                                      size=self.nb_items)))
+                                           size=self.nb_items)))
 
     def __len__(self):
         return self.nb_items
@@ -65,9 +66,11 @@ class DynamicSubsetRandomSampler(Sampler):
 
 def load_data(dataset, data_dir="data", img_size=None,
               clipto=None, batch_size=640, use_cuda=False):
-    kwargs = {
-        'num_workers': 1, 'pin_memory': True
-    } if use_cuda else {'num_workers': multiprocessing.cpu_count()-1}
+    if use_cuda:
+        kwargs = {'num_workers': 1, 'pin_memory': True}
+    else:
+        num_workers = max(1, floor((multiprocessing.cpu_count()-2)/2))
+        kwargs = {'num_workers': num_workers}
 
     # First load the DataSet
     if os.path.isfile(dataset):
