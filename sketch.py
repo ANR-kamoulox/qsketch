@@ -7,6 +7,7 @@ from .autograd_percentile import Percentile
 
 class Projectors:
     """Each projector is a set of unit-length random vector"""
+
     def __init__(self, num_thetas, data_shape):
         self.num_thetas = num_thetas
         self.data_shape = data_shape
@@ -25,8 +26,15 @@ class Projectors:
                              device=device)
         for pos, id in enumerate(idx):
             torch.manual_seed(id)
-            result[pos] = torch.randn(self.num_thetas, self.data_dim,
-                                      device=device)
+
+            nb_values = np.random.randint(low=3, high=50)
+            values = torch.randn(nb_values, device=device)
+            indices = torch.randint(low=0, high=nb_values,
+                                    size=(self.num_thetas, self.data_dim)
+                                    ).long()
+            result[pos] = values[indices]
+            #result[pos] = torch.randn(self.num_thetas, self.data_dim,
+            #                          device=device)
             result[pos] /= (torch.norm(result[pos], dim=1, keepdim=True))
         return torch.squeeze(result)
 
@@ -57,18 +65,23 @@ class Sketcher(Dataset):
         self.current += 1
         return self.__getitem__(self.current - 1)
 
-def __getitem__(self, index):
+    def __getitem__(self, index):
+        # get the device
         device = torch.device(self.device)
+
+        # get the projector
         projector = self.projectors[index].view([-1, self.projectors.data_dim])
         projector = projector.to(device)
         if self.requires_grad:
             projector.requires_grad_()
 
+        # allocate the projectons variable
         projections = torch.empty((projector.shape[0],
                                    len(self.data_source.sampler)),
                                   device=device,
                                   requires_grad=self.requires_grad)
 
+        # compute the projections by a loop over the data
         pos = 0
         for imgs, labels in self.data_source:
             # get a batch of images and send it to device
