@@ -55,9 +55,9 @@ class Sketcher(Dataset):
 
     def __next__(self):
         self.current += 1
-        return self.__getitem__(self.current-1)
+        return self.__getitem__(self.current - 1)
 
-    def __getitem__(self, index):
+def __getitem__(self, index):
         device = torch.device(self.device)
         projector = self.projectors[index].view([-1, self.projectors.data_dim])
         projector = projector.to(device)
@@ -84,7 +84,8 @@ class Sketcher(Dataset):
             pos += len(imgs)
 
         # compute the quantiles for these projections
-        return Percentile(self.num_quantiles, device)(projections), projector
+        return (Percentile(self.num_quantiles, device)(projections).float(),
+                projector)
 
 
 def add_sketch_arguments(parser):
