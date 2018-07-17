@@ -27,14 +27,14 @@ class Projectors:
         for pos, id in enumerate(idx):
             torch.manual_seed(id)
 
-            nb_values = np.random.randint(low=3, high=50)
+            """nb_values = np.random.randint(low=3, high=500)
             values = torch.randn(nb_values, device=device)
             indices = torch.randint(low=0, high=nb_values,
                                     size=(self.num_thetas, self.data_dim)
                                     ).long()
-            result[pos] = values[indices]
-            #result[pos] = torch.randn(self.num_thetas, self.data_dim,
-            #                          device=device)
+            result[pos] = values[indices]"""
+            result[pos] = torch.randn(self.num_thetas, self.data_dim,
+                                      device=device)
             result[pos] /= (torch.norm(result[pos], dim=1, keepdim=True))
         return torch.squeeze(result)
 
@@ -56,14 +56,13 @@ class Sketcher(Dataset):
         self.num_quantiles = num_quantiles
         self.requires_grad = requires_grad
         self.device = "cpu"
-        self.current = np.random.randint(0, 10000, 1)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        self.current += 1
-        return self.__getitem__(self.current - 1)
+        next_id = np.random.randint(np.iinfo(np.int32).max)
+        return self.__getitem__(next_id)
 
     def __getitem__(self, index):
         # get the device
