@@ -3,6 +3,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from .autograd_percentile import Percentile
+import atexit
+import queue
+import torch.multiprocessing as mp
+import functools
 
 
 class Projectors:
@@ -12,10 +16,8 @@ class Projectors:
         self.num_thetas = num_thetas
         self.data_shape = data_shape
         self.data_dim = np.prod(np.array(data_shape))
-
-        # prepare the torch device (cuda or cpu ?)
-        use_cuda = False  # torch.cuda.is_available()
-        self.device = "cuda" if use_cuda else "cpu"
+        # for now, always use the CPU for generating projectors
+        self.device = "cpu"
 
     def __getitem__(self, idx):
         device = torch.device(self.device)
@@ -26,13 +28,6 @@ class Projectors:
                              device=device)
         for pos, id in enumerate(idx):
             torch.manual_seed(id)
-
-            """nb_values = np.random.randint(low=3, high=500)
-            values = torch.randn(nb_values, device=device)
-            indices = torch.randint(low=0, high=nb_values,
-                                    size=(self.num_thetas, self.data_dim)
-                                    ).long()
-            result[pos] = values[indices]"""
             result[pos] = torch.randn(self.num_thetas, self.data_dim,
                                       device=device)
             result[pos] /= (torch.norm(result[pos], dim=1, keepdim=True))
@@ -49,12 +44,13 @@ class Sketcher(Dataset):
                  dataloader,
                  projectors,
                  num_quantiles,
-                 device,
                  requires_grad=False):
         self.data_source = dataloader
         self.projectors = projectors
         self.num_quantiles = num_quantiles
         self.requires_grad = requires_grad
+
+        # only use the cpu for now for the sketcher
         self.device = "cpu"
 
     def __iter__(self):
@@ -98,6 +94,55 @@ class Sketcher(Dataset):
         # compute the quantiles for these projections
         return (Percentile(self.num_quantiles, device)(projections).float(),
                 projector)
+
+
+def exit_handler(processes, control_queue):
+    print('Terminating sketchers...')
+    control_queue.put('die')
+    for p in processes:
+        p.join()
+    print('done')
+
+
+def stream_sketches(sketcher, data_queue, control_queue):
+    for (target_qf, projector) in sketcher:
+        done = False
+        while not done:
+            try:
+                data_queue.put(((target_qf, projector)), timeout=1)
+                done = True
+            except queue.Full:
+                pass
+            if not control_queue.empty():
+                return
+
+
+def start_sketching(num_workers, queue_size,
+                    dataloader, projectors, num_quantiles):
+    """ starts the sketchers, that will put data into the sketch_queue.
+    Each entry of the sketch queue will consist of a tuple
+    (target_qf, projector), stored on cpu"""
+
+    # go into a start method that works with pytorch queues
+    ctx = mp.get_context('fork')
+
+    # Allocate the sketch queue and start the sketchers jobs
+    sketch_queue = ctx.Queue(maxsize=queue_size)
+    control_queue = ctx.Queue()
+    processes = [ctx.Process(target=stream_sketches,
+                             kwargs={'sketcher': Sketcher(dataloader,
+                                                          projectors,
+                                                          num_quantiles),
+                                     'data_queue': sketch_queue,
+                                     'control_queue': control_queue})
+                 for n in range(num_workers)]
+    atexit.register(functools.partial(exit_handler,
+                                      processes=processes,
+                                      control_queue=control_queue))
+    for p in processes:
+        p.start()
+
+    return (sketch_queue, control_queue)
 
 
 def add_sketch_arguments(parser):
