@@ -7,6 +7,7 @@ import atexit
 import queue
 import torch.multiprocessing as mp
 import functools
+import time
 
 
 class Projectors:
@@ -96,53 +97,82 @@ class Sketcher(Dataset):
                 projector)
 
 
-def exit_handler(processes, control_queue):
+def exit_handler(processes, shared_data):
     print('Terminating sketchers...')
-    control_queue.put('die')
     for p in processes:
         p.join()
     print('done')
 
 
-def stream_sketches(sketcher, data_queue, control_queue):
+def stream_sketches(sketcher, data_queue, shared_data):
+    print(shared_data)
     for (target_qf, projector) in sketcher:
+        # while we didn't put the current sketch into the queue, we loop
         done = False
         while not done:
             try:
+                # put the data into the queue
                 data_queue.put(((target_qf, projector)), timeout=1)
+
+                # normally, the data is now put and we may continue
                 done = True
+                if 'counter' in shared_data:
+                    shared_data['counter'] -= 1
+                    print('value of counter', shared_data['counter'])
+                    if shared_data['counter'] < 0:
+                        print('Limit reached, ending sketching.')
+                        # they can die.
+                        # we reached the limit, we let the other workers know
+                        shared_data['sleep'] = True
+
             except queue.Full:
+                # the queue was full and we couldn't put the data in time.
+                # we have to go on with the same data in that case
                 pass
-            if not control_queue.empty():
-                return
+
+            print(shared_data)
+            if ('sleep' in shared_data) or ('die' in shared_data):
+                print('breaking the sketch loop')
+                break
+
+        while 'sleep' in shared_data:
+            print('sleeping', data_queue.qsize())
+            time.sleep(2)
+            if 'die' in shared_data:
+                break
 
 
-def start_sketching(num_workers, queue_size,
+def start_sketching(num_workers, queue_size, counter,
                     dataloader, projectors, num_quantiles):
     """ starts the sketchers, that will put data into the sketch_queue.
     Each entry of the sketch queue will consist of a tuple
-    (target_qf, projector), stored on cpu"""
-
+    (target_qf, projector), stored on cpu.
+    If counter is None: the sketching will loop forever"""
+    print(num_workers, 'num_workers')
     # go into a start method that works with pytorch queues
     ctx = mp.get_context('fork')
 
     # Allocate the sketch queue and start the sketchers jobs
     sketch_queue = ctx.Queue(maxsize=queue_size)
-    control_queue = ctx.Queue()
+    manager = mp.Manager()
+    shared_data = manager.dict()
+    if counter is not None:
+        shared_data['counter'] = counter
     processes = [ctx.Process(target=stream_sketches,
                              kwargs={'sketcher': Sketcher(dataloader,
                                                           projectors,
                                                           num_quantiles),
                                      'data_queue': sketch_queue,
-                                     'control_queue': control_queue})
+                                     'shared_data': shared_data})
                  for n in range(num_workers)]
+
     atexit.register(functools.partial(exit_handler,
                                       processes=processes,
-                                      control_queue=control_queue))
+                                      shared_data=shared_data))
     for p in processes:
         p.start()
 
-    return (sketch_queue, control_queue)
+    return sketch_queue
 
 
 def add_sketch_arguments(parser):
