@@ -6,8 +6,8 @@ from .autograd_percentile import Percentile
 import atexit
 import queue
 import torch.multiprocessing as mp
-import functools
-import time
+from contextlib import contextmanager
+from functools import partial
 
 
 class Projectors:
@@ -45,11 +45,20 @@ class Sketcher(Dataset):
                  dataloader,
                  projectors,
                  num_quantiles,
-                 requires_grad=False):
+                 seed=0):
         self.data_source = dataloader
         self.projectors = projectors
         self.num_quantiles = num_quantiles
-        self.requires_grad = requires_grad
+
+        # the random sequence should be reproductible without interfering
+        # with other np random seed stuff. To achieve this, we
+        # backup current numpy random state, and create a new one
+        # based on the provided seed. Then, we revert to the random state that
+        # was there.
+        random_state = np.random.get_state()
+        np.random.seed(seed)
+        self.random_state = np.random.get_state()
+        np.random.set_state(random_state)
 
         # only use the cpu for now for the sketcher
         self.device = "cpu"
@@ -58,7 +67,19 @@ class Sketcher(Dataset):
         return self
 
     def __next__(self):
+        # saves the current numpy random state, before setting it to the last
+        # one stored
+        random_state = np.random.get_state()
+        np.random.set_state(self.random_state)
+
+        # generate the next id
         next_id = np.random.randint(np.iinfo(np.int32).max)
+
+        # stores current numpy random state and restores the one we had before
+        self.random_state = np.random.get_state()
+        np.random.set_state(random_state)
+
+        # finally get the sketch
         return self.__getitem__(next_id)
 
     def __getitem__(self, index):
@@ -68,14 +89,11 @@ class Sketcher(Dataset):
         # get the projector
         projector = self.projectors[index].view([-1, self.projectors.data_dim])
         projector = projector.to(device)
-        if self.requires_grad:
-            projector.requires_grad_()
 
         # allocate the projectons variable
         projections = torch.empty((projector.shape[0],
                                    len(self.data_source.sampler)),
-                                  device=device,
-                                  requires_grad=self.requires_grad)
+                                  device=device)
 
         # compute the projections by a loop over the data
         pos = 0
@@ -94,85 +112,149 @@ class Sketcher(Dataset):
 
         # compute the quantiles for these projections
         return (Percentile(self.num_quantiles, device)(projections).float(),
-                projector)
+                projector, index)
 
 
-def exit_handler(processes, shared_data):
+class SketchStream:
+    def __init__(self):
+        self.processes = []
+        self.data = None
+
+        # go into a start method that works with pytorch queues
+        self.ctx = mp.get_context('fork')
+
+        self.in_progress = 0
+
+        # Allocate the sketch queue
+        self.queue = None
+
+    def dump(self, file):
+        # first pausing the sketching
+        self.pause()
+        import time
+        time.sleep(5)
+        data = []
+        while True:
+            try:
+                item = self.queue.get(block=False)
+            except queue.Empty:
+                break
+            data += [item, ]
+        with open(file, 'wb') as handle:
+            torch.save(data, handle)
+        self.load(file)
+
+    def load(self, file):
+        # killing the sketching in progress if any
+        self.stop()
+
+        # get the data
+        with open(file, 'rb') as handle:
+            data = torch.load(handle)
+
+        # create the queue
+        self.queue = self.ctx.Queue(maxsize=len(data))
+
+        # then fill with the data
+        for item in data:
+            self.queue.put(item)
+
+    def start(self, num_workers, num_sketches,
+              dataloader, projectors, num_quantiles):
+        # first stop if it was started before
+        self.stop()
+
+        # now create the queue. If infinite, then set an arbitrary maxsize
+        self.queue = self.ctx.Queue(maxsize=20 if num_sketches < 0
+                                    else num_sketches)
+
+        self.manager = self.ctx.Manager()
+        self.data = self.manager.dict()
+        self.data['in_progress'] = 0
+        self.data['max_counter'] = (num_sketches if num_sketches > 0
+                                    else np.inf)
+        self.data['counter'] = 0
+        self.lock = self.ctx.Lock()
+        self.processes = [self.ctx.Process(target=sketch_worker,
+                                           kwargs={'sketcher':
+                                                   Sketcher(dataloader,
+                                                            projectors,
+                                                            num_quantiles),
+                                                   'stream': self})
+                          for n in range(num_workers)]
+
+        atexit.register(partial(exit_handler, stream=self))
+
+        for p in self.processes:
+            p.start()
+
+    def pause(self):
+        self.data['pause'] = True
+        while self.data['in_progress'] > 0:
+            pass
+
+    def resume(self):
+        if self.data is not None:
+            self.data['pause'] = False
+
+    def stop(self):
+        if self.data is not None:
+            self.data['die'] = True
+
+
+def exit_handler(stream):
     print('Terminating sketchers...')
-    for p in processes:
+    if stream.data is not None:
+        stream.data['die'] = True
+    for p in stream.processes:
         p.join()
     print('done')
 
 
-def stream_sketches(sketcher, data_queue, shared_data):
-    print(shared_data)
-    for (target_qf, projector) in sketcher:
-        # while we didn't put the current sketch into the queue, we loop
-        done = False
-        while not done:
-            try:
-                # put the data into the queue
-                data_queue.put(((target_qf, projector)), timeout=1)
+def sketch_worker(sketcher, stream):
+    @contextmanager
+    def getlock():
+        result = stream.lock.acquire(timeout=1)
+        yield result
+        if result:
+            stream.lock.release()
 
-                # normally, the data is now put and we may continue
-                done = True
-                if 'counter' in shared_data:
-                    shared_data['counter'] -= 1
-                    print('value of counter', shared_data['counter'])
-                    if shared_data['counter'] < 0:
-                        print('Limit reached, ending sketching.')
-                        # they can die.
-                        # we reached the limit, we let the other workers know
-                        shared_data['sleep'] = True
+    pause_displayed = False
+    while True:
+        id_obtained = False
+        if ('pause' not in stream.data) or (not stream.data['pause']):
+            if pause_displayed:
+                print('Sketch worker back from sleep')
+                pause_displayed = False
 
-            except queue.Full:
-                # the queue was full and we couldn't put the data in time.
-                # we have to go on with the same data in that case
-                pass
+            with getlock():
+                id = stream.data['counter']
+                if id >= stream.data['max_counter']:
+                    # they can die.
+                    # we reached the limit, we let the other workers know
+                    print("Obtained id %d is over the target number of sketches. Pausing sketching "%id)
+                    stream.data['pause'] = True
+                else:
+                    id_obtained = True
+                    stream.data['counter'] += 1
+                    stream.data['in_progress'] += 1
 
-            print(shared_data)
-            if ('sleep' in shared_data) or ('die' in shared_data):
-                print('breaking the sketch loop')
-                break
+        if id_obtained:
+            (target_qf, projector, id) = sketcher[id]
+            stream.queue.put(((target_qf, projector, id)))
+            with stream.lock:
+                stream.data['in_progress'] -= 1
 
-        while 'sleep' in shared_data:
-            print('sleeping', data_queue.qsize())
+        if 'die' in stream.data:
+            print('Sketch worker dying')
+            break
+
+        if 'pause' in stream.data and stream.data['pause']:
+            if not pause_displayed:
+                print('Sketch worker going to sleep')
+                pause_displayed = True
+            import time
             time.sleep(2)
-            if 'die' in shared_data:
-                break
-
-
-def start_sketching(num_workers, queue_size, counter,
-                    dataloader, projectors, num_quantiles):
-    """ starts the sketchers, that will put data into the sketch_queue.
-    Each entry of the sketch queue will consist of a tuple
-    (target_qf, projector), stored on cpu.
-    If counter is None: the sketching will loop forever"""
-    print(num_workers, 'num_workers')
-    # go into a start method that works with pytorch queues
-    ctx = mp.get_context('fork')
-
-    # Allocate the sketch queue and start the sketchers jobs
-    sketch_queue = ctx.Queue(maxsize=queue_size)
-    manager = mp.Manager()
-    shared_data = manager.dict()
-    if counter is not None:
-        shared_data['counter'] = counter
-    processes = [ctx.Process(target=stream_sketches,
-                             kwargs={'sketcher': Sketcher(dataloader,
-                                                          projectors,
-                                                          num_quantiles),
-                                     'data_queue': sketch_queue,
-                                     'shared_data': shared_data})
-                 for n in range(num_workers)]
-
-    atexit.register(functools.partial(exit_handler,
-                                      processes=processes,
-                                      shared_data=shared_data))
-    for p in processes:
-        p.start()
-
-    return sketch_queue
 
 
 def add_sketch_arguments(parser):
@@ -189,5 +271,10 @@ def add_sketch_arguments(parser):
                              "negative, take all of them.",
                         type=int,
                         default=3000)
+    parser.add_argument("--num_sketches",
+                        help="Number of sketches to compute. If negative, "
+                             "take an infinite number of them.",
+                        type=int,
+                        default=-1)
 
     return parser
