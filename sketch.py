@@ -126,7 +126,7 @@ class SketchStream:
         self.in_progress = 0
 
         # Allocate the sketch queue
-        self.queue = None
+        self.queue = self.ctx.Queue()
 
     def dump(self, file):
         # first pausing the sketching
@@ -189,6 +189,8 @@ class SketchStream:
             p.start()
 
     def pause(self):
+        if self.data is None:
+            return
         self.data['pause'] = True
         while self.data['in_progress'] > 0:
             pass
