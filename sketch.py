@@ -165,7 +165,7 @@ class SketchStream:
         self.stop()
 
         # now create the queue. If infinite, then set an arbitrary maxsize
-        self.queue = self.ctx.Queue(maxsize=20 if num_sketches < 0
+        self.queue = self.ctx.Queue(maxsize=10 if num_sketches < 0
                                     else num_sketches)
 
         self.manager = self.ctx.Manager()
@@ -175,6 +175,11 @@ class SketchStream:
                                     else np.inf)
         self.data['counter'] = 0
         self.lock = self.ctx.Lock()
+        if num_workers < 0:
+            num_workers = np.inf
+        num_workers = max(1, np.min(num_workers,
+                                    np.floor((mp.cpu_count()-2)/2)))
+
         self.processes = [self.ctx.Process(target=sketch_worker,
                                            kwargs={'sketcher':
                                                    Sketcher(dataloader,
@@ -276,6 +281,11 @@ def add_sketch_arguments(parser):
     parser.add_argument("--num_sketches",
                         help="Number of sketches to compute. If negative, "
                              "take an infinite number of them.",
+                        type=int,
+                        default=-1)
+    parser.add_argument("--num_workers",
+                        help="Number of workers. If not provided, use"
+                        " all CPUs",
                         type=int,
                         default=-1)
 
