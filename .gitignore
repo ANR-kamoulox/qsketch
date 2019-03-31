@@ -12,7 +12,7 @@ events.out*
 *png
 *.pth
 *.npy
-data*
+
 
 # Distribution / packaging
 .Python
