@@ -1,7 +1,6 @@
 # imports
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 from torchpercentile import Percentile
 import atexit
 import queue
@@ -11,31 +10,66 @@ from functools import partial
 import time
 
 
-class Sketcher(Dataset):
-    """Sketcher class: takes a source of data, a dataset of projectors, and
-    construct sketches, which are the quantiles of the output of the projectors
-    when applied on the specified dataset.
+class FunctionsDataset:
+    """A dataset of functions, each of which is constructed by a factory
+    provided as a parameter.
+    This factory should accept an `index` parameter, corresponding to the
+    index of the function to construct.
+    If a `refactory` is provided, it is called to update the current element,
+    instead of creating a new one. This may be useful to save allocation time.
 
-    When accessing one of its elements, computes the corresponding sketch,
-    which means using the projector with that seed.
+    In all cases, the factories should *deterministically* generate the same
+    function given the same index.
+    """
 
-    When iterated upon, compute sketches with projectors with seeds in
-    a deterministic sequence.
+    def __init__(self, factory, refactory=None):
+        self.factory = factory
+        self.refactory = refactory
+        self.pos = 0
+        self.current = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.pos += 1
+        if self.refactory is not None and self.current is not None:
+            self.current = self.refactory(self.current, self.pos)
+        else:
+            self.current = self.factory(self.pos)
+        return self.current
+
+    def __getitem__(self, indexes):
+        if isinstance(indexes, int):
+            # only keeping a `current` for singleton queries, not for list
+            if self.refactory is not None and self.current is not None:
+                self.current = self.refactory(self.current, indexes)
+            else:
+                self.current = self.factory(indexes)
+            return self.current
+
+        return [self.factory(index=id) for id in indexes]
+
+
+class Sketcher:
+    """Sketcher class: from a given DataStream object, constructs sketches
+    for any provided function, which are the quantiles of the output of
+    this function when applied on the dataset.
+
+    A Sketcher is accessed through with a function as an index.
+
+    Optionally, a stream can be started, when a Dataset of functions
     """
 
     def __init__(self,
                  data_source,
-                 projectors,
                  num_quantiles,
-                 num_examples,
-                 seed=0):
+                 num_examples):
         """
             Create a new sketcher.
             data_source: Queue object
                 this is where we get the data from. Each item from this queue
                 should be a tuple of (X, y) values. The sentinel is None.
-            projectors: Projectors object
-                this is the dataset of Projectors.
             num_quantiles: int
                 the number of quantiles to compute the sketch with. They will
                 be picked as regularly spaced between 0 and 100
@@ -44,78 +78,65 @@ class Sketcher(Dataset):
                 The data_source is assumed to produce data endlessly.
         """
         self.data_source = data_source
-        self.projectors = projectors
         self.num_quantiles = num_quantiles
         self.num_examples = num_examples
+        self.queue = None
+        self.shared_data = None
 
-        # only use the cpu for now for the sketcher
-        self.device = "cpu"
-
-        # create a random sequence with provided seed
-        self.pos = 0
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        # get the next id
-        self.pos += 1
-
-        # finally get the sketch
-        return self.__getitem__(self.pos)
-
-    def __getitem__(self, indexes):
-        if isinstance(indexes, int):
-            index = [indexes]
-        else:
-            index = indexes
-
-        # get the device
-        device = torch.device(self.device)
+    def __getitem__(self, functions):
+        try:
+            _ = iter(functions)
+            iterable = True
+        except TypeError as te:
+            functions = [functions]
+            iterable = False
 
         # get the projector
         sketches = []
         percentiles = torch.linspace(0, 100, self.num_quantiles)
-        for id in index:
-            projector = self.projectors[id].to(device)
-
-            # allocate the projectons variable
-            projections = torch.empty((self.num_examples,
-                                       self.projectors.num_thetas),
-                                      device=device)
+        for function in functions:
+            # allocate the processed variable, to None
+            processed = None
 
             # compute the projections by a loop over the data
             pos = 0
-
             while pos < self.num_examples:
                 (imgs, labels) = self.data_source.get()
-                # get a batch of images and send it to device
-                imgs = imgs.to(device)
 
                 # aggregate the projections
                 n_imgs = min(len(imgs), self.num_examples - pos)
-                projections[pos:pos+n_imgs] = projector(imgs[:n_imgs])
+                computed = function(imgs[:n_imgs])
+                computed = computed.view(n_imgs, -1)
+                if processed is None:
+                    # now that we know the dimension, compute the object
+                    processed = torch.empty((self.num_examples,
+                                             computed.shape[1]),
+                                            device=computed.device)
+                processed[pos:pos+n_imgs] = computed
                 pos += n_imgs
+
+            # flatten the samples to a matrix for the quantiles
+            processed = processed.view(self.num_examples, -1)
             # compute the quantiles for these projections
             sketches += [
-                (Percentile()(projections, percentiles).float(),
+                (Percentile()(processed, percentiles).float(),
                  id)]
-        return sketches[0] if isinstance(indexes, int) else sketches
+        return sketches[0] if not iterable else sketches
 
+    def stream(self, functions, num_sketches, num_epochs, num_workers=-1):
+        """starts a stream of sketches
 
-class SketchStream:
-    """A SketchStream object constructs a queue attribute that will be
-    filled with sketches, which are quantiles of random projections"""
-
-    def __init__(self):
-        self.processes = []
-        self.data = None
-
-        # Allocate the sketch queue
-        self.queue = mp.Queue()
-
-    def start(self, num_workers, num_epochs, num_sketches,
-              data_stream, projectors, num_quantiles, num_examples):
+        functions: FunctionsDataset object
+            the dataset of function to iterate upon
+        num_sketches: int
+            the number of sketches to compute per epoch: each sketch
+            corresponds to one particular functions.
+        num_epochs: int
+            the number of epochs
+        num_workers: int
+            the number of workers to have. a negative value will lead to
+            picking half of the local cores
+        """
         # first stop if it was started before
         self.stop()
 
@@ -131,33 +152,26 @@ class SketchStream:
         # the number of workers
         self.queue = mp.Queue(maxsize=2*num_workers)
         self.manager = mp.Manager()
-        self.projectors = projectors
 
         # prepare some data for the synchronization of the workers
-        self.data = self.manager.dict()
-        self.data['num_epochs'] = num_epochs
-        self.data['pause'] = False
-        self.data['current_pick_epoch'] = 0
-        self.data['current_put_epoch'] = 0
-        self.data['current_sketch'] = 0
-        self.data['done_in_current_epoch'] = 0
-        self.data['num_sketches'] = (num_sketches if num_sketches > 0
-                                     else np.inf)
-        self.data['sketch_list'] = np.random.randint(
+        self.shared_data = self.manager.dict()
+        self.shared_data['num_epochs'] = num_epochs
+        self.shared_data['pause'] = False
+        self.shared_data['current_pick_epoch'] = 0
+        self.shared_data['current_put_epoch'] = 0
+        self.shared_data['current_sketch'] = 0
+        self.shared_data['done_in_current_epoch'] = 0
+        self.shared_data['num_sketches'] = (num_sketches if num_sketches > 0
+                                            else np.inf)
+        self.shared_data['sketch_list'] = np.random.randint(
                 np.iinfo(np.int16).max,
-                size=self.data['num_sketches']).astype(int)
+                size=self.shared_data['num_sketches']).astype(int)
         self.lock = mp.Lock()
 
         # prepare the workers
         self.processes = [mp.Process(target=sketch_worker,
-                                     kwargs={'sketcher':
-                                             Sketcher(data_stream.queue,
-                                                      projectors,
-                                                      num_quantiles,
-                                                      num_examples),
-                                             'data': self.data,
-                                             'lock': self.lock,
-                                             'stream_queue': self.queue})
+                                     kwargs={'sketcher': self,
+                                             'functions': functions})
                           for n in range(num_workers)]
 
         atexit.register(partial(exit_handler, stream=self))
@@ -167,51 +181,51 @@ class SketchStream:
             p.start()
 
     def pause(self):
-        if self.data is None:
+        if self.shared_data is None:
             return
-        self.data['pause'] = True
+        self.shared_data['pause'] = True
 
     def restart(self):
-        self.data['counter'] = 0
+        self.shared_data['counter'] = 0
         self.resume()
 
     def resume(self):
-        if self.data is not None:
-            self.data['pause'] = False
+        if self.shared_data is not None:
+            self.shared_data['pause'] = False
 
     def stop(self):
-        if self.data is not None:
-            self.data['die'] = True
+        if self.shared_data is not None:
+            self.shared_data['die'] = True
 
 
 def exit_handler(stream):
     print('Terminating sketchers...')
-    if stream.data is not None:
-        stream.data['die'] = True
+    if stream.shared_data is not None:
+        stream.shared_data['die'] = True
     for p in stream.processes:
         p.join()
     print('done')
 
 
-def sketch_worker(sketcher, data, lock, stream_queue):
+def sketch_worker(sketcher, functions):
     """ Actual worker for the sketch stream.
     Will get sketch ids, get data from the data queue and put sketches in the
     stream queue"""
 
     @contextmanager
     def getlock():
-        # get the lock of the stream to manipulate the stream.data
-        result = lock.acquire(block=True)
+        # get the lock of the sketcher to manipulate the sketch.shared_data
+        result = sketcher.lock.acquire(block=True)
         yield result
         if result:
-            lock.release()
+            sketcher.lock.release()
 
     pause_displayed = False
     while True:
         # not dying, unless we see that later
         worker_dying = False
 
-        if not data['pause']:
+        if not sketcher.shared_data['pause']:
             # not in pause
 
             if pause_displayed:
@@ -227,33 +241,35 @@ def sketch_worker(sketcher, data, lock, stream_queue):
                 # (the epoch we are currently asked to compute, as opposed
                 # to the put epoch, which is the epoch whose sketches we are
                 # currently putting in the queue.)
-                id = data['current_sketch']
-                sketch_id = data['sketch_list'][id].item()
-                epoch = data['current_pick_epoch']
+                id = sketcher.shared_data['current_sketch']
+                sketch_id = sketcher.shared_data['sketch_list'][id].item()
+                epoch = sketcher.shared_data['current_pick_epoch']
                 # print('sketch: got lock, epoch %d and id %d' % (epoch, id))
-                if epoch >= data['num_epochs']:
+                if epoch >= sketcher.shared_data['num_epochs']:
                     # the picked epoch is larger than the number of epochs.
                     # sketching is finished.
                     #print('epoch', epoch, 'greater than the number of epochs:',
                     #      stream.num_epochs, 'dying now.')
                     worker_dying = True
                 else:
-                    if id == data['num_sketches'] - 1:
+                    if id == sketcher.shared_data['num_sketches'] - 1:
                         # we reached the number of sketches per epoch.
                         # we let the other workers know and increment the
                         # pick epoch.
                         #print("Obtained id %d is last for this epoch. "
                         #      "Reseting the counter and incrementing current "
                         #      "epoch " % id)
-                        data['current_sketch'] = 0
-                        data['current_pick_epoch'] += 1
-                        data['sketch_list'] = np.random.randint(
-                            np.iinfo(np.int16).max,
-                            size=data['num_sketches']).astype(int)
+                        sketcher.shared_data['current_sketch'] = 0
+                        sketcher.shared_data['current_pick_epoch'] += 1
+                        sketcher.shared_data['sketch_list'] = (
+                            np.random.randint(
+                                np.iinfo(np.int16).max,
+                                size=sketcher.shared_data['num_sketches']
+                                ).astype(int))
                     else:
                         # we just increment the current sketch to pick for
                         # the next worker.
-                        data['current_sketch'] += 1
+                        sketcher.shared_data['current_sketch'] += 1
             if worker_dying:
                 # dying has been asked for. we'll just loop infinitely.
                 # this is because there is apparently some issues raised when
@@ -275,7 +291,8 @@ def sketch_worker(sketcher, data, lock, stream_queue):
             can_put = False
             while not can_put:
                 with getlock():
-                    current_put_epoch = data['current_put_epoch']
+                    current_put_epoch = (
+                        sketcher.shared_data['current_put_epoch'])
                 if current_put_epoch == epoch:
                     can_put = True
                 else:
@@ -283,27 +300,26 @@ def sketch_worker(sketcher, data, lock, stream_queue):
 
             #print('sketch: trying to put id',id,'epoch',epoch)
             # now we actually put the sketch in the queue.
-            stream_queue.put((target_qf.detach(), sketch_id))
+            sketcher.queue.put((target_qf.detach(), sketch_id))
             #print('sketch: we put id', id, 'epoch', epoch)
 
             with getlock():
                 # we put the data, now update the counting
-                data['done_in_current_epoch'] += 1
-                #print('sketch: after put, got lock. id', id, 'epoch', epoch, 'done in current epoch',data['done_in_current_epoch'])
-                if (
-                        data['done_in_current_epoch']
-                        == data['num_sketches']):
+                sketcher.shared_data['done_in_current_epoch'] += 1
+                #print('sketch: after put, got lock. id', id, 'epoch', epoch, 'done in current epoch',sketcher.shared_data['done_in_current_epoch'])
+                if (sketcher.shared_data['done_in_current_epoch']
+                        == sketcher.shared_data['num_sketches']):
                     # This item was the last of its epoch, we put the sentinel
                     #print('Sketch: sending the sentinel')
-                    stream_queue.put(None)
-                    data['done_in_current_epoch'] = 0
-                    data['current_put_epoch'] += 1
+                    sketcher.queue.put(None)
+                    sketcher.shared_data['done_in_current_epoch'] = 0
+                    sketcher.shared_data['current_put_epoch'] += 1
 
-        if 'die' in data:
+        if 'die' in sketcher.shared_data:
             print('Sketch worker dying')
             break
 
-        if data['pause']:
+        if sketcher.shared_data['pause']:
             if not pause_displayed:
                 print('Sketch worker going to sleep')
                 pause_displayed = True
@@ -311,10 +327,6 @@ def sketch_worker(sketcher, data, lock, stream_queue):
 
 
 def add_sketch_arguments(parser):
-    parser.add_argument("--num_thetas",
-                        help="Number of thetas per sketch.",
-                        type=int,
-                        default=2000)
     parser.add_argument("--num_quantiles",
                         help="Number of quantiles to compute",
                         type=int,
