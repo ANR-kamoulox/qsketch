@@ -1,8 +1,16 @@
 import torch
+from torchvision import datasets, transforms
 import qsketch
 import torch.multiprocessing as mp
-import numpy as np
 import matplotlib.pylab as pl
+
+
+class Multiply:
+    def __init__(self, index):
+        self.mul = index
+
+    def __call__(self, x):
+        return torch.sigmoid(torch.log(x ** (self.mul/1000)))
 
 
 if __name__ == "__main__":
@@ -14,37 +22,38 @@ if __name__ == "__main__":
     device = torch.device(device_str)
 
     # load the data
-    train_data = qsketch.load_image_dataset(
-        dataset='MNIST',
-        data_dir='~/data/',
-        img_size=32
-    )
-
-    data_shape = train_data[0][0].shape
+    data = datasets.MNIST('~/data/MNIST',
+                          transform=transforms.Compose([
+                           transforms.ToTensor(),
+                           transforms.Normalize((0.1307,), (0.3081,))])
+                         )
 
     # Launch the data stream
-    data_stream = qsketch.DataStream(train_data)
-    data_stream.start()
+    data_stream = qsketch.DataStream(data)
+    data_stream.stream()
 
-    # prepare the projectors
-    projectors = qsketch.Projectors(
-        num_thetas=10,
-        data_shape=data_shape,
-        projector_class=qsketch.SparseLinearProjector)
+    # prepare the sketcher
+    sketcher = qsketch.Sketcher(data_source=data_stream,
+                                num_quantiles=10,
+                                num_examples=1000)
 
-    # start sketching
-    quantiles_stream = qsketch.SketchStream()
-    quantiles_stream.start(num_workers=-1,
-                           num_epochs=10,
-                           num_sketches=500,
-                           data_stream=data_stream,
-                           projectors=projectors,
-                           num_quantiles=100,
-                           num_examples=1000)
+    result = sketcher[lambda x: torch.mean((x > 10).float().view(x.shape[0], -1), dim=1)]
 
-    for (quantiles, projector_id) in iter(quantiles_stream.queue.get, None):
+    import ipdb; ipdb.set_trace()
+    # prepare the functions
+    functions = qsketch.FunctionsDataset(
+        qsketch.Factory(Multiply))
+
+    sketch_queue = sketcher.stream(functions=functions,
+                                   num_sketches=10,
+                                   num_epochs=1,
+                                   num_workers=2,
+                                   max_id=10)
+
+    for (quantiles, projector_id) in iter(sketch_queue.get, None):
         # Getting quantiles and plotting them
-        pl.plot(quantiles.numpy())
+        #import ipdb; ipdb.set_trace()
+        pl.plot(quantiles.numpy().T)
         pl.xlabel('quantile')
         pl.ylabel('value')
         pl.show()

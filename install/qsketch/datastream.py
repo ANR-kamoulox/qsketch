@@ -32,7 +32,7 @@ class DataStream:
         # create a lock
         self.lock = mp.Lock()
 
-    def start(self):
+    def stream(self):
         self.process = mp.Process(
                             target=data_worker,
                             kwargs={'lock': self.lock,

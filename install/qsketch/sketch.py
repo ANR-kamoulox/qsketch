@@ -1,54 +1,55 @@
 # imports
 import numpy as np
 import torch
+from torch.utils.data import Dataset, DataLoader
 from torchpercentile import Percentile
 import atexit
 import queue
+from .datastream import DataStream
+import multiprocessing.queues as queues
 import torch.multiprocessing as mp
 from contextlib import contextmanager
 from functools import partial
 import time
+import warnings
 
 
-class FunctionsDataset:
-    """A dataset of functions, each of which is constructed by a factory
-    provided as a parameter.
-    This factory should accept an `index` parameter, corresponding to the
-    index of the function to construct.
-    If a `refactory` is provided, it is called to update the current element,
-    instead of creating a new one. This may be useful to save allocation time.
-
-    In all cases, the factories should *deterministically* generate the same
-    function given the same index.
+class ModulesDataset:
+    """A dataset of torch Modules.
+    All modules constructors should accept an `index` parameter,
+    corresponding to the index of the function to construct.
+    If a `recycle` member method is provided, it is called when iterating
+    to update the current element, instead of creating a new one.
+    This may be useful to save allocation time.
     """
 
-    def __init__(self, factory, refactory=None):
-        self.factory = factory
-        self.refactory = refactory
+    def __init__(self, module_class, **kwargs):
+        self.module_class = module_class
+        self.parameters = kwargs
         self.pos = 0
         self.current = None
+        self.recycle = (hasattr(module_class, 'recycle')
+                        and callable(module_class.recycle))
 
     def __iter__(self):
         return self
 
     def __next__(self):
         self.pos += 1
-        if self.refactory is not None and self.current is not None:
-            self.current = self.refactory(self.current, self.pos)
-        else:
-            self.current = self.factory(self.pos)
-        return self.current
+        return self[self.pos]
 
     def __getitem__(self, indexes):
         if isinstance(indexes, int):
             # only keeping a `current` for singleton queries, not for list
-            if self.refactory is not None and self.current is not None:
-                self.current = self.refactory(self.current, indexes)
+            if self.recycle and self.current is not None:
+                self.current.recycle(indexes)
             else:
-                self.current = self.factory(indexes)
+                self.current = self.module_class(index=indexes,
+                                                 **self.parameters)
             return self.current
 
-        return [self.factory(index=id) for id in indexes]
+        return [self.module_class(index=id, **self.parameters)
+                for id in indexes]
 
 
 class Sketcher:
@@ -63,49 +64,68 @@ class Sketcher:
 
     def __init__(self,
                  data_source,
-                 num_quantiles,
+                 percentiles,
                  num_examples):
         """
             Create a new sketcher.
-            data_source: Queue object
+            data_source: either a DataStream, a Queue, a Tensor,
+                         a Dataset or a DataLoader
                 this is where we get the data from. Each item from this queue
                 should be a tuple of (X, y) values. The sentinel is None.
-            num_quantiles: int
-                the number of quantiles to compute the sketch with. They will
-                be picked as regularly spaced between 0 and 100
+            percentiles: int
+                the percentiles (between 0 and 100) to compute.
             num_examples: int
                 the number of samples to use for computing each sketch.
-                The data_source is assumed to produce data endlessly.
+                If the data_source does not produce enough data,
+                it will be used until deplepted (loop over its elements ends)
         """
-        self.data_source = data_source
-        self.num_quantiles = num_quantiles
+        if isinstance(data_source, DataStream):
+            self.data_iterator = iter(data_source.queue.get, None)
+        elif isinstance(data_source, queues.Queue):
+            self.data_iterator = iter(data_source.get, None)
+        elif isinstance(data_source, torch.Tensor):
+            self.data_iterator = [[data_source, None]]
+        elif isinstance(data_source, Dataset):
+            self.data_iterator = DataLoader(data_source, batch_size=1000)
+        elif isinstance(data_source, DataLoader):
+            self.data_iterator = data_source
+        else:
+            raise Exception('Sketcher: data_source type is not understood')
+
+        self.percentiles = percentiles
         self.num_examples = num_examples
         self.queue = None
+        self.functions = None
         self.shared_data = None
 
-    def __getitem__(self, functions):
+    def __getitem__(self, modules):
         try:
-            _ = iter(functions)
+            _ = iter(modules)
             iterable = True
         except TypeError as te:
-            functions = [functions]
+            modules = [modules]
             iterable = False
 
         # get the projector
         sketches = []
-        percentiles = torch.linspace(0, 100, self.num_quantiles)
-        for function in functions:
+        for module in modules:
             # allocate the processed variable, to None
             processed = None
 
             # compute the projections by a loop over the data
             pos = 0
             while pos < self.num_examples:
-                (imgs, labels) = self.data_source.get()
-
+                # getting the next items
+                try:
+                    (imgs, labels) = next(self.data_iterator)
+                except StopIteration:
+                    warnings.warn('Number of datapoints not reaching %d, but'
+                                  'only %d. Using this and continuing.' % (
+                                   self.num_examples, pos))
+                    break
                 # aggregate the projections
                 n_imgs = min(len(imgs), self.num_examples - pos)
-                computed = function(imgs[:n_imgs])
+                computed = module(imgs[:n_imgs])
                 computed = computed.view(n_imgs, -1)
                 if processed is None:
                     # now that we know the dimension, compute the object
@@ -115,18 +135,25 @@ class Sketcher:
                 processed[pos:pos+n_imgs] = computed
                 pos += n_imgs
 
+            if processed is None:
+                raise Exception('Did not get any data from data_source. '
+                                'Cannot sketch.')
+
+            # truncating in case we don't get enough.
+            processed = processed[:pos]
+
             # flatten the samples to a matrix for the quantiles
-            processed = processed.view(self.num_examples, -1)
+            processed = processed.view(processed.shape[0], -1)
+
             # compute the quantiles for these projections
-            sketches += [
-                (Percentile()(processed, percentiles).float(),
-                 id)]
+            sketches += [Percentile()(processed, self.percentiles).float(), ]
         return sketches[0] if not iterable else sketches
 
-    def stream(self, functions, num_sketches, num_epochs, num_workers=-1):
+    def stream(self, modules, num_sketches, num_epochs,
+               num_workers=-1, max_id=None):
         """starts a stream of sketches
 
-        functions: FunctionsDataset object
+        modules: ModulesDataset object
             the dataset of function to iterate upon
         num_sketches: int
             the number of sketches to compute per epoch: each sketch
@@ -136,6 +163,8 @@ class Sketcher:
         num_workers: int
             the number of workers to have. a negative value will lead to
             picking half of the local cores
+        max_id: int or None
+            the maximum index for modules.
         """
         # first stop if it was started before
         self.stop()
@@ -151,11 +180,13 @@ class Sketcher:
         # now create a queue with a maxsize corresponding to a few times
         # the number of workers
         self.queue = mp.Queue(maxsize=2*num_workers)
-        self.manager = mp.Manager()
+        manager = mp.Manager()
 
         # prepare some data for the synchronization of the workers
-        self.shared_data = self.manager.dict()
+        self.shared_data = manager.dict()
         self.shared_data['num_epochs'] = num_epochs
+        self.shared_data['max_id'] = (np.iinfo(np.int16).max if max_id is None
+                                      else max_id)
         self.shared_data['pause'] = False
         self.shared_data['current_pick_epoch'] = 0
         self.shared_data['current_put_epoch'] = 0
@@ -164,21 +195,24 @@ class Sketcher:
         self.shared_data['num_sketches'] = (num_sketches if num_sketches > 0
                                             else np.inf)
         self.shared_data['sketch_list'] = np.random.randint(
-                np.iinfo(np.int16).max,
+                self.shared_data['max_id'],
                 size=self.shared_data['num_sketches']).astype(int)
         self.lock = mp.Lock()
 
         # prepare the workers
-        self.processes = [mp.Process(target=sketch_worker,
-                                     kwargs={'sketcher': self,
-                                             'functions': functions})
-                          for n in range(num_workers)]
+        processes = [mp.Process(target=sketch_worker,
+                                kwargs={'sketcher': self,
+                                        'modules': modules})
+                     for n in range(num_workers)]
 
-        atexit.register(partial(exit_handler, stream=self))
+        atexit.register(partial(exit_handler, stream=self,
+                                processes=processes))
 
         # go
-        for p in self.processes:
+        for p in processes:
             p.start()
+
+        return self.queue
 
     def pause(self):
         if self.shared_data is None:
@@ -198,16 +232,16 @@ class Sketcher:
             self.shared_data['die'] = True
 
 
-def exit_handler(stream):
+def exit_handler(stream, processes):
     print('Terminating sketchers...')
     if stream.shared_data is not None:
         stream.shared_data['die'] = True
-    for p in stream.processes:
+    for p in processes:
         p.join()
     print('done')
 
 
-def sketch_worker(sketcher, functions):
+def sketch_worker(sketcher, modules):
     """ Actual worker for the sketch stream.
     Will get sketch ids, get data from the data queue and put sketches in the
     stream queue"""
@@ -244,7 +278,7 @@ def sketch_worker(sketcher, functions):
                 id = sketcher.shared_data['current_sketch']
                 sketch_id = sketcher.shared_data['sketch_list'][id].item()
                 epoch = sketcher.shared_data['current_pick_epoch']
-                # print('sketch: got lock, epoch %d and id %d' % (epoch, id))
+                #print('sketch: got lock, epoch %d and id %d' % (epoch, sketch_id))
                 if epoch >= sketcher.shared_data['num_epochs']:
                     # the picked epoch is larger than the number of epochs.
                     # sketching is finished.
@@ -263,7 +297,7 @@ def sketch_worker(sketcher, functions):
                         sketcher.shared_data['current_pick_epoch'] += 1
                         sketcher.shared_data['sketch_list'] = (
                             np.random.randint(
-                                np.iinfo(np.int16).max,
+                                sketcher.shared_data['max_id'],
                                 size=sketcher.shared_data['num_sketches']
                                 ).astype(int))
                     else:
@@ -283,7 +317,7 @@ def sketch_worker(sketcher, functions):
 
             # now to the thing. We compute the sketch that has been asked for.
             #print('sketch: now trying to compute id', id)
-            (target_qf, sketch_id) = sketcher[sketch_id]
+            target_qf = sketcher[modules[sketch_id]]
 
             # print('sketch: we computed the sketch with id', id)
             # we need to wait until the current put epoch is the epoch we

@@ -1,3 +1,2 @@
 from .datastream import DataStream
-from .sketch import FunctionsDataset, Sketcher, add_sketch_arguments
-from .projectors import LinearProjector, SparseLinearProjector
+from .sketch import ModulesDataset, Sketcher, add_sketch_arguments
