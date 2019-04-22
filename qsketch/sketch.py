@@ -1,5 +1,4 @@
 # imports
-import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchpercentile import Percentile
@@ -242,7 +241,7 @@ class Sketcher:
         # get the number of workers
         if num_workers < 0 or num_workers is None:
             # if not defined, take at least 1 and at most half of the cores
-            num_workers = np.inf
+            num_workers = 1e7  # should be enough as a max number =)
             num_workers = max(1, min(num_workers,
                               int((mp.cpu_count()-1)/2)))
 
@@ -255,17 +254,19 @@ class Sketcher:
         # prepare some data for the synchronization of the workers
         self.shared_data = manager.dict()
         self.shared_data['num_epochs'] = num_epochs
-        self.shared_data['max_id'] = (np.iinfo(np.int16).max if max_id is None
-                                      else max_id)
+        self.shared_data['max_id'] = (
+            torch.iinfo(torch.int16).max if max_id is None
+            else max_id)
         self.shared_data['pause'] = False
         self.shared_data['current_pick_epoch'] = 0
         self.shared_data['current_put_epoch'] = 0
         self.shared_data['current_sketch'] = 0
         self.shared_data['done_in_current_epoch'] = 0
         self.shared_data['num_sketches'] = (num_sketches if num_sketches > 0
-                                            else np.inf)
-        self.shared_data['sketch_list'] = np.random.randint(
-                self.shared_data['max_id'],
+                                            else -1)
+        self.shared_data['sketch_list'] = torch.randint(
+                low=0,
+                high=self.shared_data['max_id'],
                 size=self.shared_data['num_sketches']).astype(int)
         self.lock = mp.Lock()
 
@@ -366,8 +367,9 @@ def sketch_worker(sketcher, modules):
                         sketcher.shared_data['current_sketch'] = 0
                         sketcher.shared_data['current_pick_epoch'] += 1
                         sketcher.shared_data['sketch_list'] = (
-                            np.random.randint(
-                                sketcher.shared_data['max_id'],
+                            torch.randint(
+                                low=0,
+                                high=sketcher.shared_data['max_id'],
                                 size=sketcher.shared_data['num_sketches']
                                 ).astype(int))
                     else:

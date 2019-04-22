@@ -1,6 +1,9 @@
 # qsketch
 
-Utilitary package for sketching datasets with quantiles of random projections
+This package computes quantiles of the output of arbitrary pytorch Module
+over arbitrary datasets.
+
+It is useful for research about training with sliced Wasserstein distances.
 
 ## installation
-Go into the `install` folder and run `python setup.py install` with the appropriate packages installed.
+Type `pip install .` in the root directory
