@@ -10,6 +10,7 @@ import multiprocessing.queues as queues
 import torch.multiprocessing as mp
 from contextlib import contextmanager
 from functools import partial
+import collections
 import time
 import warnings
 
@@ -52,6 +53,112 @@ class ModulesDataset:
                 for id in indexes]
 
 
+def to_iterator(data_source):
+    if data_source is None:
+        return None
+
+    # try known stuff to make an iterator out of it
+    if isinstance(data_source, DataStream):
+        data_iterator = iter(data_source.queue.get, None)
+    elif isinstance(data_source, queues.Queue):
+        data_iterator = iter(data_source.get, None)
+    elif isinstance(data_source, torch.Tensor):
+        data_iterator = iter([[data_source, None]])
+    elif isinstance(data_source, Dataset):
+        data_iterator = DataLoader(data_source, batch_size=5000)
+    elif isinstance(data_source, DataLoader):
+        data_iterator = data_source
+    else:
+        if isinstance(data_source, collections.Iterable):
+            # it's iterable, assuming it's ok
+            data_iterator = data_source
+        else:
+            raise Exception('Sketcher: data_source type is not understood')
+    return data_iterator
+
+
+def sketch(modules, data, percentiles, num_examples=None):
+
+    # check whether we want to sketch several modules or just one
+    try:
+        _ = iter(modules)
+        iterable = True
+    except TypeError as te:
+        modules = [modules]
+        iterable = False
+
+    data_iterator = to_iterator(data)
+
+    # for each module
+    sketches = []
+    for module in modules:
+        # allocate the processed variable, to None
+        processed = None
+
+        pos = 0
+        # compute the projections by a loop over the data. By default, use
+        # all data except if num_examples is provided
+        while (True if num_examples is None
+               else pos < num_examples):
+
+            # getting the next items
+            try:
+                (imgs, labels) = next(data_iterator)
+            except StopIteration:
+                if num_examples is not None:
+                    warnings.warn(
+                        'Number of datapoints not reaching %d, but'
+                        'only %d. Using this and continuing.' % (
+                               num_examples, pos))
+                break
+            # aggregate the projections. get only what's necessary if
+            # num_examples is provided (batch is possibly too large)
+            if num_examples is not None:
+                n_imgs = min(len(imgs), num_examples - pos)
+            else:
+                n_imgs = len(imgs)
+            # apply the module
+            computed = module(imgs[:n_imgs])
+            # turn the output into a matrix
+            computed = computed.view(n_imgs, -1)
+
+            if processed is None:
+                # we computed for the first time. Now we have several
+                # options
+                if num_examples is not None:
+                    # We know the total number of elements. preallocate this
+                    processed = torch.empty((num_examples,
+                                             computed.shape[1]),
+                                            device=computed.device)
+                else:
+                    # We don't know the total number of elements. Just
+                    # allocate an empty tensor
+                    processed = torch.Tensor().to(computed.device)
+            if num_examples is not None:
+                # if the computations are preallocated, store them at the right
+                # place (faster)
+                processed[pos:pos+n_imgs] = computed
+            else:
+                # concatenate the result:
+                processed = torch.cat((processed, computed))
+            # in any case, augment the position
+            pos += n_imgs
+
+        if processed is None:
+            raise Exception('Did not get any data from data_source. '
+                            'Cannot sketch.')
+
+        # truncating in case we don't get enough. Possibly no-op
+        processed = processed[:pos]
+
+        # flatten the samples to a matrix for the quantiles
+        processed = processed.view(processed.shape[0], -1)
+
+        # compute the quantiles for these projections
+        sketches += [Percentile()(processed, percentiles).float(), ]
+    return sketches[0] if not iterable else sketches
+
+
 class Sketcher:
     """Sketcher class: from a given DataStream object, constructs sketches
     for any provided function, which are the quantiles of the output of
@@ -65,89 +172,52 @@ class Sketcher:
     def __init__(self,
                  data_source,
                  percentiles,
-                 num_examples):
+                 num_examples=None):
         """
             Create a new sketcher.
-            data_source: either a DataStream, a Queue, a Tensor,
+            data_source: either None, or a DataStream, a Queue, a Tensor,
                          a Dataset or a DataLoader
-                this is where we get the data from. Each item from this queue
-                should be a tuple of (X, y) values. The sentinel is None.
+                If None, this sketcher cannot be streamed, because no
+                default data is provided. Otherwise, this is where we get the
+                data from. Each item should be a tuple of (X, y) values.
+                The sentinel is None.
             percentiles: int
                 the percentiles (between 0 and 100) to compute.
-            num_examples: int
+            num_examples: int or None
                 the number of samples to use for computing each sketch.
-                If the data_source does not produce enough data,
-                it will be used until deplepted (loop over its elements ends)
+                If None or if the data_source does not produce enough data,
+                all data will be used for sketching
         """
-        if isinstance(data_source, DataStream):
-            self.data_iterator = iter(data_source.queue.get, None)
-        elif isinstance(data_source, queues.Queue):
-            self.data_iterator = iter(data_source.get, None)
-        elif isinstance(data_source, torch.Tensor):
-            self.data_iterator = [[data_source, None]]
-        elif isinstance(data_source, Dataset):
-            self.data_iterator = DataLoader(data_source, batch_size=1000)
-        elif isinstance(data_source, DataLoader):
-            self.data_iterator = data_source
-        else:
-            raise Exception('Sketcher: data_source type is not understood')
-
+        self.data_iterator = to_iterator(data_source)
         self.percentiles = percentiles
         self.num_examples = num_examples
         self.queue = None
         self.functions = None
         self.shared_data = None
 
+    def __call__(self, modules, data=None, percentiles=None):
+        # Use default if some parameters are not provided
+        if data is None:
+            data_iterator = self.data_iterator
+            if data_iterator is None:
+                raise Exception('Sketcher has no default data. Aborting.')
+            num_examples = self.num_examples
+        else:
+            data_iterator = to_iterator(data)
+            num_examples = None
+        if percentiles is None:
+            percentiles = self.percentiles
+
+        return sketch(modules=modules,
+                      data=data_iterator,
+                      percentiles=percentiles,
+                      num_examples=num_examples)
+
     def __getitem__(self, modules):
-        try:
-            _ = iter(modules)
-            iterable = True
-        except TypeError as te:
-            modules = [modules]
-            iterable = False
-
-        # get the projector
-        sketches = []
-        for module in modules:
-            # allocate the processed variable, to None
-            processed = None
-
-            # compute the projections by a loop over the data
-            pos = 0
-            while pos < self.num_examples:
-                # getting the next items
-                try:
-                    (imgs, labels) = next(self.data_iterator)
-                except StopIteration:
-                    warnings.warn('Number of datapoints not reaching %d, but'
-                                  'only %d. Using this and continuing.' % (
-                                   self.num_examples, pos))
-                    break
-                # aggregate the projections
-                n_imgs = min(len(imgs), self.num_examples - pos)
-                computed = module(imgs[:n_imgs])
-                computed = computed.view(n_imgs, -1)
-                if processed is None:
-                    # now that we know the dimension, compute the object
-                    processed = torch.empty((self.num_examples,
-                                             computed.shape[1]),
-                                            device=computed.device)
-                processed[pos:pos+n_imgs] = computed
-                pos += n_imgs
-
-            if processed is None:
-                raise Exception('Did not get any data from data_source. '
-                                'Cannot sketch.')
-
-            # truncating in case we don't get enough.
-            processed = processed[:pos]
-
-            # flatten the samples to a matrix for the quantiles
-            processed = processed.view(processed.shape[0], -1)
-
-            # compute the quantiles for these projections
-            sketches += [Percentile()(processed, self.percentiles).float(), ]
-        return sketches[0] if not iterable else sketches
+        # call the sketcher with default parameters
+        return self(modules=modules,
+                    data=None,
+                    percentiles=None)
 
     def stream(self, modules, num_sketches, num_epochs,
                num_workers=-1, max_id=None):
@@ -317,6 +387,7 @@ def sketch_worker(sketcher, modules):
 
             # now to the thing. We compute the sketch that has been asked for.
             #print('sketch: now trying to compute id', id)
+            module_current = modules[sketch_id]
             target_qf = sketcher[modules[sketch_id]]
 
             # print('sketch: we computed the sketch with id', id)
