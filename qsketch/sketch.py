@@ -267,7 +267,7 @@ class Sketcher:
         self.shared_data['sketch_list'] = torch.randint(
                 low=0,
                 high=self.shared_data['max_id'],
-                size=self.shared_data['num_sketches']).astype(int)
+                size=(self.shared_data['num_sketches'],)).int()
         self.lock = mp.Lock()
 
         # prepare the workers
@@ -275,9 +275,9 @@ class Sketcher:
                                 kwargs={'sketcher': self,
                                         'modules': modules})
                      for n in range(num_workers)]
-
-        atexit.register(partial(exit_handler, stream=self,
-                                processes=processes))
+        #
+        # atexit.register(partial(exit_handler, stream=self,
+        #                         processes=processes))
 
         # go
         for p in processes:
@@ -349,29 +349,29 @@ def sketch_worker(sketcher, modules):
                 id = sketcher.shared_data['current_sketch']
                 sketch_id = sketcher.shared_data['sketch_list'][id].item()
                 epoch = sketcher.shared_data['current_pick_epoch']
-                #print('sketch: got lock, epoch %d and id %d' % (epoch, sketch_id))
+                # print('sketch: got lock, epoch %d and id %d' % (epoch, sketch_id))
                 if epoch >= sketcher.shared_data['num_epochs']:
                     # the picked epoch is larger than the number of epochs.
                     # sketching is finished.
-                    #print('epoch', epoch, 'greater than the number of epochs:',
-                    #      stream.num_epochs, 'dying now.')
+                    # print('epoch', epoch, 'greater than the number of epochs:',
+                    #       sketcher.shared_data['num_epochs'], 'dying now.')
                     worker_dying = True
                 else:
                     if id == sketcher.shared_data['num_sketches'] - 1:
                         # we reached the number of sketches per epoch.
                         # we let the other workers know and increment the
                         # pick epoch.
-                        #print("Obtained id %d is last for this epoch. "
-                        #      "Reseting the counter and incrementing current "
-                        #      "epoch " % id)
+                        # print("Obtained id %d is last for this epoch. "
+                        #       "Reseting the counter and incrementing current "
+                        #       "epoch " % id)
                         sketcher.shared_data['current_sketch'] = 0
                         sketcher.shared_data['current_pick_epoch'] += 1
                         sketcher.shared_data['sketch_list'] = (
                             torch.randint(
                                 low=0,
                                 high=sketcher.shared_data['max_id'],
-                                size=sketcher.shared_data['num_sketches']
-                                ).astype(int))
+                                size=(sketcher.shared_data['num_sketches'],)
+                                ).int())
                     else:
                         # we just increment the current sketch to pick for
                         # the next worker.
@@ -381,15 +381,20 @@ def sketch_worker(sketcher, modules):
                 # this is because there is apparently some issues raised when
                 # we just kill the worker, in case some data in the queue
                 # originated from him has not been taken out ?
-                #print(
-                #    id, epoch, 'Reached the desired amount of epochs. Dying.')
+                # print(
+                #     id, epoch, 'Reached the desired amount of epochs. Dying.')
+                while not sketcher.queue.empty():
+                    pass
+                # HERE WE SHOULD ACTUALLY DIE. However, there seems to be
+                # an issue of the code not running (queue disappears) when
+                # we do. Hence, I will infinitely loop here. BUG TO FIX
                 while True:
                     time.sleep(10)
                 return
 
             # now to the thing. We compute the sketch that has been asked for.
-            #print('sketch: now trying to compute id', id)
-            module_current = modules[sketch_id]
+            # print('sketch: now trying to compute %d with id %d'
+            #       % (id, sketch_id))
             target_qf = sketcher[modules[sketch_id]]
 
             # print('sketch: we computed the sketch with id', id)
@@ -403,27 +408,36 @@ def sketch_worker(sketcher, modules):
                 if current_put_epoch == epoch:
                     can_put = True
                 else:
+                    if 'die' in sketcher.shared_data:
+                        # print('Sketch worker dying wait for put')
+                        while True:
+                            # see line 388
+                            time.sleep(10)
+                        return
                     time.sleep(1)
 
-            #print('sketch: trying to put id',id,'epoch',epoch)
+            # print('sketch: trying to put id', id, 'epoch', epoch)
             # now we actually put the sketch in the queue.
             sketcher.queue.put((target_qf.detach(), sketch_id))
-            #print('sketch: we put id', id, 'epoch', epoch)
+            # print('sketch: we put id', id, 'epoch', epoch)
 
             with getlock():
                 # we put the data, now update the counting
                 sketcher.shared_data['done_in_current_epoch'] += 1
-                #print('sketch: after put, got lock. id', id, 'epoch', epoch, 'done in current epoch',sketcher.shared_data['done_in_current_epoch'])
+                # print('sketch: after put, got lock. id', id, 'epoch', epoch, 'done in current epoch',sketcher.shared_data['done_in_current_epoch'])
                 if (sketcher.shared_data['done_in_current_epoch']
                         == sketcher.shared_data['num_sketches']):
                     # This item was the last of its epoch, we put the sentinel
-                    #print('Sketch: sending the sentinel')
+                    # print('Sketch: sending the sentinel')
                     sketcher.queue.put(None)
                     sketcher.shared_data['done_in_current_epoch'] = 0
                     sketcher.shared_data['current_put_epoch'] += 1
 
         if 'die' in sketcher.shared_data:
-            print('Sketch worker dying')
+            # print('Sketch worker dying')
+            while True:
+                # see line 388
+                time.sleep(10)
             break
 
         if sketcher.shared_data['pause']:

@@ -38,7 +38,7 @@ class DataStream:
                             kwargs={'lock': self.lock,
                                     'params': self.params,
                                     'data_queue': self.queue})
-        atexit.register(partial(exit_handler, stream=self))
+        #atexit.register(partial(exit_handler, stream=self))
         self.process.start()
 
 
@@ -82,5 +82,5 @@ def data_worker(lock, params, data_queue):
                 check = 100
                 with getlock():
                     if params['die']:
-                        break
+                        return
         epoch += 1
