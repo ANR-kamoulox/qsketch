@@ -3,14 +3,7 @@ from torchvision import datasets, transforms
 import qsketch
 import torch.multiprocessing as mp
 import matplotlib.pylab as pl
-
-
-class Multiply:
-    def __init__(self, index):
-        self.mul = index
-
-    def __call__(self, x):
-        return torch.sigmoid(torch.log(x ** (self.mul/1000)))
+import nets
 
 
 if __name__ == "__main__":
@@ -23,36 +16,32 @@ if __name__ == "__main__":
 
     # load the data
     data = datasets.MNIST('~/data/MNIST',
-                          transform=transforms.Compose([
-                           transforms.ToTensor(),
-                           transforms.Normalize((0.1307,), (0.3081,))])
-                         )
+                          transform=transforms.ToTensor())
 
-    # Launch the data stream
+    # Create a data stream and launch it
     data_stream = qsketch.DataStream(data)
     data_stream.stream()
 
-    # prepare the sketcher
-    sketcher = qsketch.Sketcher(data_source=data_stream,
-                                num_quantiles=10,
-                                num_examples=1000)
-
-    result = sketcher[lambda x: torch.mean((x > 10).float().view(x.shape[0], -1), dim=1)]
+    # prepare the random networks dataset
+    randomcoders = qsketch.ModulesDataset(
+                        nets.DenseEncoder,
+                        input_shape=data[0][0].shape,
+                        bottleneck_size=100)
 
     import ipdb; ipdb.set_trace()
-    # prepare the functions
-    functions = qsketch.FunctionsDataset(
-        qsketch.Factory(Multiply))
+    # prepare the sketcher
+    sketcher = qsketch.Sketcher(data_source=data_stream,
+                                percentiles=torch.linspace(0, 100, 300),
+                                num_examples=1000)
 
-    sketch_queue = sketcher.stream(functions=functions,
-                                   num_sketches=10,
-                                   num_epochs=1,
-                                   num_workers=2,
-                                   max_id=10)
+    sketcher.stream(modules=randomcoders,
+                    num_sketches=10,
+                    num_epochs=1,
+                    num_workers=2)
 
-    for (quantiles, projector_id) in iter(sketch_queue.get, None):
+    for (quantiles, projector_id) in iter(sketcher.queue.get, None):
         # Getting quantiles and plotting them
-        #import ipdb; ipdb.set_trace()
+        import ipdb; ipdb.set_trace()
         pl.plot(quantiles.numpy().T)
         pl.xlabel('quantile')
         pl.ylabel('value')
