@@ -16,6 +16,11 @@ import warnings
 
 class ModulesDataset:
     """A dataset of torch Modules.
+    module_class: a torch.nn.Module
+        this is the class name to turn into a dataset.
+    randomizer: function with
+    XXXXXXXXXXXXXXXXXXXXXXXx
+        if True,
     All modules constructors should accept an `index` parameter,
     corresponding to the index of the function to construct.
     If a `recycle` member method is provided, it is called when iterating
@@ -23,7 +28,7 @@ class ModulesDataset:
     This may be useful to save allocation time.
     """
 
-    def __init__(self, module_class, **kwargs):
+    def __init__(self, module_class, randomizer=torch.randn, **kwargs):
         self.module_class = module_class
         self.parameters = kwargs
         self.pos = 0
@@ -37,6 +42,25 @@ class ModulesDataset:
     def __next__(self):
         self.pos += 1
         return self[self.pos]
+
+    @staticmethod
+    def recycle_module(module, index, rand_fn=torch.randn):
+        """ default recycling method for modules. We need a
+        particular randn that makes sure we use cuda if available,
+        even if the net is to be on cpu. This is because the devices do not
+        share the random sequence, so that we may not have the same output,
+        which is required here"""
+        torch.manual_seed(index)
+        if torch.cuda.is_available():
+            gen_device = torch.device('cuda')
+        else:
+            gen_device = torch.device('cpu')
+        params = list(module.parameters())
+        params = module.state_dict()
+        for key in params:
+            params[key] = rand_fn(params[key].shape,
+                                  device=gen_device).to(params[key].device)
+        module.load_state_dict(params)
 
     def __getitem__(self, indexes):
         if isinstance(indexes, int):
