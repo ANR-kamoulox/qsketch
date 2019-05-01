@@ -18,6 +18,10 @@ class ModulesDataset:
     """A dataset of torch modules.
     module_class: a torch.nn.Module
         this is the class name to turn into a dataset.
+    device: string
+        the device on which to generate the modules. Be careful that two
+        ModulesDataset objects are equal if and only if they are using the same
+        device.
     recycle: boolean
         whether or not to use recycling, which significantly accelerates
         accessing elements. If recycling is activated, a current element
@@ -28,11 +32,12 @@ class ModulesDataset:
         elements
     """
 
-    def __init__(self, module_class, recycle=True, **kwargs):
+    def __init__(self, module_class, device='cpu', recycle=True, **kwargs):
         self.module_class = module_class
         self.parameters = kwargs
         self.pos = 0
         self.current = None
+        self.device = device
         self.recycle = recycle
 
     def __iter__(self):
@@ -42,46 +47,28 @@ class ModulesDataset:
         self.pos += 1
         return self[self.pos]
 
-    @staticmethod
-    def recycle_module(module, index):
+    def recycle_module(self, module, index):
         """ default recycling method for modules.
         We need to make sure all recycling are performed with the same
         random sequence, which means it must be done on the same device.
-        for this reason, if cuda is available, all modules are transported
-        there before initialization.
-        If the module features a `reset_parameters` function, this one is
-        called after setting the seed. If not, a default randomization is
-        performed, using torch.randn."""
-        if torch.cuda.is_available():
-            gen_device = torch.device('cuda')
-        else:
-            gen_device = torch.device('cpu')
-
+        self.device is used here for this reason."""
+        print('recycle')
         params = module.state_dict()
-        in_devices = {}
-        for key in params:
-            in_devices[key] = params[key].device
-
         torch.manual_seed(index)
         if (
                 hasattr(module, 'reset_parameters')
                 and callable(module.reset_parameters)):
-            # we have a reset_parameters function. we need to call it, and
-            # then put back the tensors to their initial devices. this
-            # complicated solution is for when different parmameters are on
-            # different devices
-            module = module.to(gen_device)
+            # we have a reset_parameters function. we need to call it after
+            # being sure the module is on the right device
+            module = module.to(self.device)
             module.reset_parameters()
-            params = module.state_dict()
-            for key in in_devices:
-                params[key] = params[key].to(in_devices[key])
         else:
             params = module.state_dict()
             for key in params:
                 params[key] = torch.randn(
                     params[key].shape,
-                    device=gen_device).to(in_devices[key])
-        module.load_state_dict(params)
+                    device=self.device)
+            module.load_state_dict(params)
 
     def __getitem__(self, indexes):
         # get items, possibly using recycling
@@ -91,15 +78,16 @@ class ModulesDataset:
                 # for singleton queries, not for list
                 if self.current is None:
                     self.current = self.module_class(**self.parameters)
-                result = self.current
+                result = self.current.to(self.device)
             else:
-                result = self.module_class(**self.parameters)
-            ModulesDataset.recycle_module(result, indexes)
+                result = self.module_class(**self.parameters).to(self.device)
+            self.recycle_module(result, indexes)
             return result
         else:
             result = []
             for index in indexes:
-                new_module = self.module_class(**self.parameters)
+                new_module = (self.module_class(**self.parameters)
+                              .to(self.device))
                 ModulesDataset.recycle_module(new_module, index)
                 result += [new_module]
             return result
@@ -138,7 +126,6 @@ def to_iterator(data_source):
 
 
 def sketch(modules, data, percentiles, num_examples=None):
-
     # check whether we want to sketch several modules or just one
     try:
         _ = iter(modules)
@@ -177,8 +164,9 @@ def sketch(modules, data, percentiles, num_examples=None):
                 n_imgs = min(len(imgs), num_examples - pos)
             else:
                 n_imgs = len(imgs)
-            # apply the module
-            computed = module(imgs[:n_imgs])
+
+            # apply the module after putting it on the data device
+            computed = module.to(imgs.device)(imgs[:n_imgs])
             # turn the output into a matrix
             computed = computed.view(n_imgs, -1)
 
