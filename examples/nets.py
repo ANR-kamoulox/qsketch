@@ -19,7 +19,6 @@ class DenseEncoder(nn.Module):
         return torch.relu(out)
 
     def reset_parameters(self):
-        print('reset')
         self.fc1.reset_parameters()
         self.fc2.reset_parameters()
 
