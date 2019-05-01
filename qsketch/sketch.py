@@ -52,7 +52,6 @@ class ModulesDataset:
         We need to make sure all recycling are performed with the same
         random sequence, which means it must be done on the same device.
         self.device is used here for this reason."""
-        print('recycle')
         params = module.state_dict()
         torch.manual_seed(index)
         if (
@@ -444,7 +443,8 @@ def sketch_worker(sketcher, modules):
             # now to the thing. We compute the sketch that has been asked for.
             # print('sketch: now trying to compute %d with id %d'
             #       % (id, sketch_id))
-            target_qf = sketcher[modules[sketch_id]]
+            module = modules[sketch_id]
+            target_qf = sketcher[module]
 
             # print('sketch: we computed the sketch with id', id)
             # we need to wait until the current put epoch is the epoch we

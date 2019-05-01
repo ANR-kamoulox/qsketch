@@ -42,8 +42,12 @@ if __name__ == "__main__":
     # prepare the sketcher
     sketcher = qsketch.Sketcher(data_source=data_stream,
                                 percentiles=torch.linspace(0, 100, 300),
-                                num_examples=1000)
+                                num_examples=5000)
 
+    for a in range(10):
+        print(sketcher[randomcoders[0]])
+        import time
+        time.sleep(4)
     sketcher.stream(modules=randomcoders,
                     num_sketches=10,
                     num_epochs=1,
