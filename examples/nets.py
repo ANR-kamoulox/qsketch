@@ -18,6 +18,11 @@ class DenseEncoder(nn.Module):
         out = self.fc2(out)
         return torch.relu(out)
 
+    def reset_parameters(self):
+        print('reset')
+        self.fc1.reset_parameters()
+        self.fc2.reset_parameters()
+
 
 class DenseDecoder(nn.Module):
     def __init__(self, input_shape, bottleneck_size=64):
@@ -32,3 +37,7 @@ class DenseDecoder(nn.Module):
         return torch.sigmoid(self.fc2(out)).view(
             -1, self.input_shape[0], self.input_shape[1], self.input_shape[2]
         )
+
+    def reset_parameters(self):
+        self.fc1.reset_parameters()
+        self.fc2.reset_parameters()

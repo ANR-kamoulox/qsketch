@@ -25,6 +25,7 @@ if __name__ == "__main__":
     # prepare the random networks dataset
     randomcoders = qsketch.ModulesDataset(
                         nets.DenseEncoder,
+                        device='cuda',
                         input_shape=data[0][0].shape,
                         bottleneck_size=100)
     import time
