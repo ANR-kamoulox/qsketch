@@ -61,7 +61,6 @@ if __name__ == "__main__":
     for epoch in range(1000):
         train_loss = 0
         for (target_quantiles, projector_id) in iter(sketcher.queue.get, None):
-            print(projector_id)
             projector = randomcoders[projector_id]
             optimizer.zero_grad()
             quantiles = sketcher(projector, particles)
