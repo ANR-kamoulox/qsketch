@@ -27,6 +27,15 @@ if __name__ == "__main__":
                         nets.DenseEncoder,
                         input_shape=data[0][0].shape,
                         bottleneck_size=100)
+    import time
+    start = time.time(); test = randomcoders[0]; print(time.time()-start)
+    print('0', test.fc1.weight[:5])
+    start = time.time(); test = randomcoders[10]; print(time.time()-start)
+    print('10', test.fc1.weight[:5])
+    start = time.time(); test = randomcoders[0]; print(time.time()-start)
+    print('0', test.fc1.weight[:5])
+    start = time.time(); test = randomcoders(10); print(time.time()-start)
+    print('10 call', test.fc1.weight[:5])
 
     import ipdb; ipdb.set_trace()
     # prepare the sketcher

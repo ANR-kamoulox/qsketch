@@ -15,26 +15,25 @@ import warnings
 
 
 class ModulesDataset:
-    """A dataset of torch Modules.
+    """A dataset of torch modules.
     module_class: a torch.nn.Module
         this is the class name to turn into a dataset.
-    randomizer: function with
-    XXXXXXXXXXXXXXXXXXXXXXXx
-        if True,
-    All modules constructors should accept an `index` parameter,
-    corresponding to the index of the function to construct.
-    If a `recycle` member method is provided, it is called when iterating
-    to update the current element, instead of creating a new one.
-    This may be useful to save allocation time.
+    recycle: boolean
+        whether or not to use recycling, which significantly accelerates
+        accessing elements. If recycling is activated, a current element
+        is kept in memory, which is reassigned new values on demand, instead
+        of a new allocation.
+    kwargs: dict
+        parameters to provide to the class constructor when creating new
+        elements
     """
 
-    def __init__(self, module_class, randomizer=torch.randn, **kwargs):
+    def __init__(self, module_class, recycle=True, **kwargs):
         self.module_class = module_class
         self.parameters = kwargs
         self.pos = 0
         self.current = None
-        self.recycle = (hasattr(module_class, 'recycle')
-                        and callable(module_class.recycle))
+        self.recycle = recycle
 
     def __iter__(self):
         return self
@@ -44,36 +43,74 @@ class ModulesDataset:
         return self[self.pos]
 
     @staticmethod
-    def recycle_module(module, index, rand_fn=torch.randn):
-        """ default recycling method for modules. We need a
-        particular randn that makes sure we use cuda if available,
-        even if the net is to be on cpu. This is because the devices do not
-        share the random sequence, so that we may not have the same output,
-        which is required here"""
-        torch.manual_seed(index)
+    def recycle_module(module, index):
+        """ default recycling method for modules.
+        We need to make sure all recycling are performed with the same
+        random sequence, which means it must be done on the same device.
+        for this reason, if cuda is available, all modules are transported
+        there before initialization.
+        If the module features a `reset_parameters` function, this one is
+        called after setting the seed. If not, a default randomization is
+        performed, using torch.randn."""
         if torch.cuda.is_available():
             gen_device = torch.device('cuda')
         else:
             gen_device = torch.device('cpu')
-        params = list(module.parameters())
+
         params = module.state_dict()
+        in_devices = {}
         for key in params:
-            params[key] = rand_fn(params[key].shape,
-                                  device=gen_device).to(params[key].device)
+            in_devices[key] = params[key].device
+
+        torch.manual_seed(index)
+        if (
+                hasattr(module, 'reset_parameters')
+                and callable(module.reset_parameters)):
+            # we have a reset_parameters function. we need to call it, and
+            # then put back the tensors to their initial devices. this
+            # complicated solution is for when different parmameters are on
+            # different devices
+            module = module.to(gen_device)
+            module.reset_parameters()
+            params = module.state_dict()
+            for key in in_devices:
+                params[key] = params[key].to(in_devices[key])
+        else:
+            params = module.state_dict()
+            for key in params:
+                params[key] = torch.randn(
+                    params[key].shape,
+                    device=gen_device).to(in_devices[key])
         module.load_state_dict(params)
 
     def __getitem__(self, indexes):
+        # get items, possibly using recycling
         if isinstance(indexes, int):
-            # only keeping a `current` for singleton queries, not for list
-            if self.recycle and self.current is not None:
-                self.current.recycle(indexes)
+            if self.recycle:
+                # only keeping track of a `current`
+                # for singleton queries, not for list
+                if self.current is None:
+                    self.current = self.module_class(**self.parameters)
+                result = self.current
             else:
-                self.current = self.module_class(index=indexes,
-                                                 **self.parameters)
-            return self.current
+                result = self.module_class(**self.parameters)
+            ModulesDataset.recycle_module(result, indexes)
+            return result
+        else:
+            result = []
+            for index in indexes:
+                new_module = self.module_class(**self.parameters)
+                ModulesDataset.recycle_module(new_module, index)
+                result += [new_module]
+            return result
 
-        return [self.module_class(index=id, **self.parameters)
-                for id in indexes]
+    def __call__(self, indexes):
+        # get items, without recycling (new items necessarily)
+        recycle_state = self.recycle
+        self.recycle = False
+        result = self[indexes]
+        self.recycle = recycle_state
+        return result
 
 
 def to_iterator(data_source):
