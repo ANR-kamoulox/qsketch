@@ -101,7 +101,6 @@ if __name__ == "__main__":
             axes.imshow(np.transpose(pic_npy, (1, 2, 0)),
                         interpolation='nearest',
                         aspect='auto')
-            #plt.axis('off')
             plt.title('Generated samples, iteration %04d' % epoch)
             fig.tight_layout()
             if not os.path.exists(plot_path):
