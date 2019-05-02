@@ -32,7 +32,7 @@ if __name__ == "__main__":
     # prepare the random networks dataset
     randomcoders = qsketch.ModulesDataset(
                         nets.DenseEncoder,
-                        device='cuda' if torch.cuda.is_available else 'cpu',
+                        device='cuda' if torch.cuda.is_available() else 'cpu',
                         input_shape=data[0][0].shape,
                         bottleneck_size=100)
     # import time
