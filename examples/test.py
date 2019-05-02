@@ -32,7 +32,7 @@ if __name__ == "__main__":
     # prepare the random networks dataset
     randomcoders = qsketch.ModulesDataset(
                         nets.DenseEncoder,
-                        device='cpu',
+                        device='cuda' if torch.cuda.is_available else 'cpu',
                         input_shape=data[0][0].shape,
                         bottleneck_size=100)
     # import time
@@ -57,7 +57,7 @@ if __name__ == "__main__":
     sketcher.stream(modules=randomcoders,
                     num_sketches=10,
                     num_epochs=1000,
-                    num_workers=2)
+                    num_workers=12)
 
     particles = torch.randn((num_samples,) + data[0][0].shape)
     particles = torch.nn.Parameter(particles)

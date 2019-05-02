@@ -157,6 +157,8 @@ def sketch(modules, data, percentiles, num_examples=None):
                         'only %d. Using this and continuing.' % (
                                num_examples, pos))
                 break
+            if torch.cuda.is_available:
+                imgs = imgs.to('cuda')
             # aggregate the projections. get only what's necessary if
             # num_examples is provided (batch is possibly too large)
             if num_examples is not None:
