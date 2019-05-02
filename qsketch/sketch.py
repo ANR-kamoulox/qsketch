@@ -158,15 +158,15 @@ def sketch(modules, data, percentiles, num_examples=None):
                                num_examples, pos))
                 break
 
-            # bring the data to the device of the module
-            imgs = imgs.to(next(module.parameters()).device)
-
             # aggregate the projections. get only what's necessary if
             # num_examples is provided (batch is possibly too large)
             if num_examples is not None:
                 n_imgs = min(len(imgs), num_examples - pos)
             else:
                 n_imgs = len(imgs)
+
+            # bring the module to the data device if it's not done already
+            module = module.to(imgs.device)
 
             # apply the module after putting it on the data device
             computed = module(imgs[:n_imgs])
