@@ -1,4 +1,5 @@
 # imports
+import torch
 from torch.utils.data import DataLoader
 import torch.multiprocessing as mp
 from math import floor
@@ -12,6 +13,7 @@ class DataStream:
 
     def __init__(self,
                  dataset,
+                 device='cpu',
                  num_epochs=-1, queue=None):
         """creates a new datastream object. If num_epoch is negative, will
         loop endlessly. If the queue object is None, will create a new one"""
@@ -32,10 +34,14 @@ class DataStream:
         # create a lock
         self.lock = mp.Lock()
 
+        # remember the choice of cuda
+        self.device = device
+
     def stream(self):
         self.process = mp.Process(
                             target=data_worker,
-                            kwargs={'lock': self.lock,
+                            kwargs={'device': self.device,
+                                    'lock': self.lock,
                                     'params': self.params,
                                     'data_queue': self.queue})
         #atexit.register(partial(exit_handler, stream=self))
@@ -50,7 +56,7 @@ def exit_handler(stream):
     print('done')
 
 
-def data_worker(lock, params, data_queue):
+def data_worker(device, lock, params, data_queue):
     @contextmanager
     def getlock():
         # get the lock of the stream to manipulate the stream.data
@@ -64,8 +70,8 @@ def data_worker(lock, params, data_queue):
         dataset = params['dataset']
         num_epochs = params['num_epochs']
 
-    use_cuda = False
-    if use_cuda:
+    device_obj = torch.device(device)
+    if device == 'cuda':
         kwargs = {'num_workers': 1, 'pin_memory': True}
     else:
         num_workers = max(1, floor((mp.cpu_count()-1)/2))
@@ -76,7 +82,7 @@ def data_worker(lock, params, data_queue):
     while num_epochs < 0 or epoch < num_epochs:
         check = 100
         for (X, Y) in data_source:
-            data_queue.put((X, Y))
+            data_queue.put((X.to(device_obj), Y.to(device_obj)))
             check -= 1
             if check == 0:
                 check = 100

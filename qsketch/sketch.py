@@ -8,7 +8,6 @@ from .datastream import DataStream
 import multiprocessing.queues as queues
 import torch.multiprocessing as mp
 from contextlib import contextmanager
-from functools import partial
 import collections
 import time
 import warnings
