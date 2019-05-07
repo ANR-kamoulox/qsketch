@@ -13,9 +13,11 @@ mpl.rcParams['savefig.pad_inches'] = 0
 # A class for random linear projections
 class LinearProjector(torch.nn.Linear):
     def __init__(self, in_features, out_features):
+        self.dim_in = torch.prod(torch.tensor(in_features))
+        self.dim_out = out_features
         super(LinearProjector, self).__init__(
-            in_features=torch.prod(torch.tensor(in_features)),
-            out_features=out_features,
+            in_features=self.dim_in,
+            out_features=self.dim_out,
             bias=False)
         self.reset_parameters()
 
@@ -25,8 +27,8 @@ class LinearProjector(torch.nn.Linear):
 
     def reset_parameters(self):
         super(LinearProjector, self).reset_parameters()
-        # doing some fancy stuff where the weights are heavy tail
-        new_weight = self.weight**3
+        new_weight = self.weight
+
         # make sure each projector is normalized
         self.weight = torch.nn.Parameter(
             new_weight/torch.norm(new_weight, dim=1, keepdim=True))
@@ -61,7 +63,7 @@ if __name__ == "__main__":
                         LinearProjector,
                         device=device,
                         in_features=data[0][0].shape,
-                        out_features=500)
+                        out_features=3000)
 
     # prepare the sketcher
     sketcher = qsketch.Sketcher(data_source=data_stream,
@@ -77,7 +79,7 @@ if __name__ == "__main__":
     # initialize particles and the optimizer
     particles = torch.randn((num_samples,) + data[0][0].shape, device=device)
     particles = torch.nn.Parameter(particles)
-    optimizer = torch.optim.RMSprop((particles,))
+    optimizer = torch.optim.Adam((particles,), lr=1e-1)
     criterion = torch.nn.MSELoss()
 
     # now doing the training, optimizing the particles
