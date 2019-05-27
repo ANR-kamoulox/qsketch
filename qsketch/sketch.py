@@ -314,7 +314,7 @@ def sketch_worker(sketcher, modules):
                 id = sketcher.shared_data['current_sketch']
                 sketch_id = sketcher.shared_data['sketch_list'][id].item()
                 epoch = sketcher.shared_data['current_pick_epoch']
-                print('sketch: got lock, epoch %d and id %d' % (epoch, sketch_id))
+                # print('sketch: got lock, epoch %d and id %d' % (epoch, sketch_id))
                 if epoch >= sketcher.shared_data['num_epochs']:
                     # the picked epoch is larger than the number of epochs.
                     # sketching is finished.
@@ -385,7 +385,7 @@ def sketch_worker(sketcher, modules):
             # print('sketch: trying to put id', id, 'epoch', epoch)
             # now we actually put the sketch in the queue.
             sketcher.queue.put((target_qf.detach(), sketch_id))
-            print('sketch: we put id', id, 'epoch', epoch)
+            # print('sketch: we put id', id, 'epoch', epoch)
 
             with getlock():
                 # we put the data, now update the counting
