@@ -14,6 +14,7 @@ class DataStream:
     def __init__(self,
                  dataset,
                  device='cpu',
+                 num_workers=2,
                  num_epochs=-1, queue=None):
         """creates a new datastream object. If num_epoch is negative, will
         loop endlessly. If the queue object is None, will create a new one"""
@@ -34,13 +35,14 @@ class DataStream:
         # create a lock
         self.lock = mp.Lock()
 
-        # remember the choice of cuda
         self.device = device
+        self.num_workers = num_workers
 
     def stream(self):
         self.process = mp.Process(
                             target=data_worker,
                             kwargs={'device': self.device,
+                                    'num_workers': self.num_workers,
                                     'lock': self.lock,
                                     'params': self.params,
                                     'data_queue': self.queue})
@@ -56,7 +58,7 @@ def exit_handler(stream):
     print('done')
 
 
-def data_worker(device, lock, params, data_queue):
+def data_worker(device, num_workers, lock, params, data_queue):
     @contextmanager
     def getlock():
         # get the lock of the stream to manipulate the stream.data
@@ -71,14 +73,24 @@ def data_worker(device, lock, params, data_queue):
         num_epochs = params['num_epochs']
 
     device_obj = torch.device(device)
-    if device == 'cuda':
+    if device == 'cuda' and not dataset[0][0].is_cuda:
+        print('[DataStream] the dataset is on CPU, and CUDA is asked. Pinning'
+              ' memory.')
+        # we will pin memory only if the dataset is on CPU
         kwargs = {'num_workers': 1, 'pin_memory': True}
+        num_workers = 1
+    elif dataset[0][0].is_cuda:
+        print('[DataStream] The dataset is on CUDA, picking 0 workers.')
+        kwargs = {'num_workers': 0}
+        num_workers = 0
     else:
-        num_workers = max(1, floor((mp.cpu_count()-1)/2))
+        print('[DataStream] the dataset is on CPU, and CPU is asked. '
+              'Multiprocessing.')
         kwargs = {'num_workers': num_workers}
     data_source = DataLoader(dataset, batch_size=600, **kwargs)
 
-    print('Starting the DataStream worker')
+    print('[DataStream] Starting the sampling with %d workers'
+          % num_workers)
     while num_epochs < 0 or epoch < num_epochs:
         check = 100
         for (X, Y) in data_source:

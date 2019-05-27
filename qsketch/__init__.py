@@ -1,2 +1,3 @@
 from .datastream import DataStream
-from .sketch import ModulesDataset, Sketcher, add_sketch_arguments
+from .datasets import ModulesDataset, TransformedDataset
+from .sketch import Sketcher, add_sketch_arguments
