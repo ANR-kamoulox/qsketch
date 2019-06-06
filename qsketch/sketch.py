@@ -125,12 +125,12 @@ def sketch(modules, data, percentiles, num_examples=None):
 
 class Sketcher:
     """Sketcher class: from a given DataStream object, constructs sketches
-    for any provided function, which are the quantiles of the output of
-    this function when applied on the dataset.
+    for any provided Module, which are the quantiles of the output of
+    this module when applied on the dataset.
 
-    A Sketcher is accessed through with a function as an index.
+    A Sketcher is accessed with a module as an index.
 
-    Optionally, a stream can be started, when a Dataset of functions
+    Optionally, a stream can be started, with a Dataset of modules
     """
 
     def __init__(self,
@@ -434,3 +434,6 @@ def add_sketch_arguments(parser):
                         type=int,
                         default=-1)
     return parser
+
+class GSW:
+    def __init__()
