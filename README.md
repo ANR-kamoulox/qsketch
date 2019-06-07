@@ -19,5 +19,5 @@ The module comprises some key ingredients which are:
 * `Sketcher` objects encapsulate the application of some Module on the data, and the computation of quantiles of the corresponding outputs. A Sketcher object is initialized with a data source, which can notably be a DataStream, and is directly accessed with the module of which output you want to compute the quantiles on the data:
   > quantiles = sketcher[test_module]
 
-It is also possible to start a stream of sketching through the `stream` method, in which case the sketcher will start sketching processes that will fill in a queue, that can be used for training.  
+   It is also possible to start a stream of sketching through the `stream` method, in which case the sketcher will start sketching processes that will fill in a queue, that can be used for training.  
 * `GSW` Generalized Sliced Wasserstein objects are created with a dataset as an argument, the specifications of the projections to use (either linear or arbitrary pytorch Modules), and will automatically compute the generalized sliced Wasserstein distance between a batch and this dataset. See the example
