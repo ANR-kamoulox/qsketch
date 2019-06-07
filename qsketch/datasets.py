@@ -1,6 +1,7 @@
 import torch
 import copy
 
+
 class ModulesDataset:
     """A dataset of torch modules.
     module_class: a torch.nn.Module

@@ -4,6 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchpercentile import Percentile
 import atexit
 import queue
+from .datasets import ModulesDataset
 from .datastream import DataStream
 import multiprocessing.queues as queues
 import torch.multiprocessing as mp
@@ -156,7 +157,6 @@ class Sketcher:
         self.percentiles = percentiles
         self.num_examples = num_examples
         self.queue = None
-        self.functions = None
         self.shared_data = None
 
     def __call__(self, modules, data=None, percentiles=None):
@@ -219,9 +219,13 @@ class Sketcher:
         # prepare some data for the synchronization of the workers
         self.shared_data = manager.dict()
         self.shared_data['num_epochs'] = num_epochs
-        self.shared_data['max_id'] = (
-            torch.iinfo(torch.int16).max if max_id is None
-            else max_id)
+        if max_id is None:
+            self.shared_data['max_id'] = (
+                len(modules) if not isinstance(modules, ModulesDataset)
+                else torch.iinfo(torch.int16).max
+            )
+        else:
+            self.shared_data['max_id'] = max_id
         self.shared_data['pause'] = False
         self.shared_data['current_pick_epoch'] = 0
         self.shared_data['current_put_epoch'] = 0
@@ -229,10 +233,12 @@ class Sketcher:
         self.shared_data['done_in_current_epoch'] = 0
         self.shared_data['num_sketches'] = (num_sketches if num_sketches > 0
                                             else -1)
-        self.shared_data['sketch_list'] = torch.randint(
+        self.shared_data['sketch_list'] = (
+            None if num_sketches == -1
+            else torch.randint(
                 low=0,
                 high=self.shared_data['max_id'],
-                size=(self.shared_data['num_sketches'],)).int()
+                size=(self.shared_data['num_sketches'],)).int())
         self.lock = mp.Lock()
 
         # prepare the workers
@@ -312,11 +318,22 @@ def sketch_worker(sketcher, modules):
                 # to the put epoch, which is the epoch whose sketches we are
                 # currently putting in the queue.)
                 id = sketcher.shared_data['current_sketch']
-                sketch_id = sketcher.shared_data['sketch_list'][id].item()
+                if sketcher.shared_data['num_sketches'] == -1:
+                    # if there's an infinite number of sketches in this epoch,
+                    # just pick one item from the modules at random
+                    if hasattr(modules, '__len__'):
+                        max = len(modules)
+                    else:
+                        max = torch.iinfo(torch.int16).max
+                    sketch_id = torch.randint(low=0,
+                                              high=max,
+                                              size=(1,)).item()
+                else:
+                    sketch_id = sketcher.shared_data['sketch_list'][id].item()
                 epoch = sketcher.shared_data['current_pick_epoch']
                 # print('sketch: got lock, epoch %d and id %d' % (epoch, sketch_id))
                 if epoch >= sketcher.shared_data['num_epochs']:
-                    # the picked epoch is larger than the number of epochs.
+                    # if the picked epoch is larger than the number of epochs.
                     # sketching is finished.
                     # print('epoch', epoch, 'greater than the number of epochs:',
                     #       sketcher.shared_data['num_epochs'], 'dying now.')
@@ -434,6 +451,3 @@ def add_sketch_arguments(parser):
                         type=int,
                         default=-1)
     return parser
-
-class GSW:
-    def __init__()
