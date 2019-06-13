@@ -11,6 +11,7 @@ class LinearProjector(torch.nn.Linear):
     def __init__(self, input_shape, num_projections):
         self.dim_in = torch.prod(torch.tensor(input_shape))
         self.dim_out = num_projections
+
         super(LinearProjector, self).__init__(
             in_features=self.dim_in,
             out_features=self.dim_out,
@@ -18,8 +19,9 @@ class LinearProjector(torch.nn.Linear):
         self.reset_parameters()
 
     def forward(self, input):
+        input = input.view(input.shape[0], -1)
         return super(LinearProjector, self).forward(
-            input.view(input.shape[0], -1))
+            input)
 
     def reset_parameters(self):
         super(LinearProjector, self).reset_parameters()
@@ -28,6 +30,17 @@ class LinearProjector(torch.nn.Linear):
         # make sure each projector is normalized
         self.weight = torch.nn.Parameter(
            new_weight/torch.norm(new_weight, dim=1, keepdim=True))
+
+    def eval(self):
+        self.weight.requires_grad = False
+
+    def train(self):
+        self.weight.requires_grad = True
+
+    def backward(self, grad):
+        """Manually compute the gradient of the layer for any input"""
+        return torch.mm(grad.view(grad.shape[0], -1), self.weight)
+
 
 
 def sw(batch1, batch2, num_projections=1000):
