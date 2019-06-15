@@ -20,8 +20,9 @@ class LinearProjector(torch.nn.Linear):
 
     def forward(self, input):
         input = input.view(input.shape[0], -1)
-        return super(LinearProjector, self).forward(
+        result = super(LinearProjector, self).forward(
             input)
+        return result
 
     def reset_parameters(self):
         super(LinearProjector, self).reset_parameters()
@@ -40,7 +41,6 @@ class LinearProjector(torch.nn.Linear):
     def backward(self, grad):
         """Manually compute the gradient of the layer for any input"""
         return torch.mm(grad.view(grad.shape[0], -1), self.weight)
-
 
 
 def sw(batch1, batch2, num_projections=1000):
@@ -158,7 +158,7 @@ class GSW:
                 (target_percentiles,
                  projector_id) = self.sketcher.queue.get(blocking)
                 projector = self.projectors[projector_id]
-            except queue.Queue.Empty:
+            except queue.Empty:
                 return None
         else:
             projector = self.projectors[
@@ -178,6 +178,5 @@ class GSW:
             target_percentiles = target_percentiles[indices].squeeze()
         else:
             percentiles = self.percentiles
-
         test_percentiles = sketch(projector, batch, percentiles)
         return torch.nn.MSELoss()(target_percentiles, test_percentiles)
