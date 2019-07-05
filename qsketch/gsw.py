@@ -10,8 +10,12 @@ from torchsearchsorted import searchsorted
 class LinearProjector(torch.nn.Linear):
     def __init__(self, input_shape, num_projections):
         self.dim_in = torch.prod(torch.tensor(input_shape))
-        self.dim_out = num_projections
-
+        try:
+            _ = iter(num_projections)
+            self.shape_out = num_projections
+        except TypeError as te:
+            self.shape_out = [num_projections, ]
+        self.dim_out = torch.prod(torch.tensor(self.shape_out))
         super(LinearProjector, self).__init__(
             in_features=self.dim_in,
             out_features=self.dim_out,
@@ -22,6 +26,7 @@ class LinearProjector(torch.nn.Linear):
         input = input.view(input.shape[0], -1)
         result = super(LinearProjector, self).forward(
             input)
+        result = result.view(-1, *self.shape_out)
         return result
 
     def reset_parameters(self):
@@ -142,8 +147,10 @@ class GSW:
                                  num_sketches=-1,
                                  num_epochs=1,
                                  num_workers=num_sketchers)
+        self.target_percentiles = None
+        self.projector_id = None
 
-    def __call__(self, batch, blocking=True):
+    def __call__(self, batch, blocking=True, new_target=True):
         """"compute the (generalized) sliced Wasserstein distance between
         the object dataset and the provided batch
         batch: torch.Tensor (num_samples, ) + sample_shape
@@ -153,20 +160,22 @@ class GSW:
             whether or not to wait for the sketchers to have provided one
             available set of percentiles computed on the data."""
 
-        if self.asynchronous:
-            try:
-                (target_percentiles,
-                 projector_id) = self.sketcher.queue.get(blocking)
-                projector = self.projectors[projector_id]
-            except queue.Empty:
-                return None
-        else:
-            projector = self.projectors[
-                torch.randint(low=0,
-                              high=len(self.projectors),
-                              size=(1,)).item()]
-            target_percentiles = self.sketcher(projector)
-        target_percentiles = target_percentiles.to(batch.device)
+        if new_target or (self.target_percentiles is None):
+            if self.asynchronous:
+                try:
+                    (self.target_percentiles,
+                     self.projector_id) = self.sketcher.queue.get(blocking)
+                except queue.Empty:
+                    return None
+            else:
+                self.projector_id = torch.randint(low=0,
+                                                  high=len(self.projectors),
+                                                  size=(1,)).item()
+                projector = self.projectors[self.projector_id]
+                self.target_percentiles = self.sketcher(projector)
+
+        target_percentiles = self.target_percentiles.to(batch.device)
+        projector = self.projectors[self.projector_id]
         num_percentiles = min(batch.shape[0], self.num_percentiles)
         if num_percentiles != self.num_percentiles:
             # this may happen if the batch is too small
