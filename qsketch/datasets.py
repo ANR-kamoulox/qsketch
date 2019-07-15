@@ -89,34 +89,61 @@ class ModulesDataset:
 
 
 class TransformedDataset:
-    """ Create a dataset whose items are obtained by applying a specified
-    torch Module to the items and the targets of some other dataset."""
+    """ Create a dataset """
 
     def __init__(self, dataset, transform=None, target_transform=None,
-                 device='cpu'):
+                 streamable=True, cudastream=False):
+        """Create a TransformeDataset object, whose items are obtained by
+        applying a specified torch Module to the items and the targets of
+        some other dataset.
+
+        Parameters
+        ----------
+        dataset: Dataset-like object
+            the dataset to which the transforms will be applied.
+        transform: torch Module
+            the module to apply to the 'input' items of the dataset
+        target_transform: torch Module
+            module to apply to the 'target' items of the dataset
+        streamable: boolean
+            if this dataset is to be used with a datastream, we:
+            * copy the transforms, because we are going to use them
+              in multiprocessing.
+            * move them to cpu, because the dataset needs to be pickable,
+              which will not happen if the transform is on GPU. We will move
+              to gpu if desired only in the getitem method, assuming that we
+              are in the right process at this stage.
+        cudastream: boolean
+            if streamable is False, this parameter is ignored.
+            otherwise, if True, the transforms will be transferred to cuda.
+
+        Warning
+        -------
+        If you are using a TransformedDataset in multiprocessing, as with a
+        datastream, be extra-sure NOT to access its element before running the
+        stream. This may cause the multiprocessing to break due to some cryptic
+        bug in pytorch.
+
+        """
         self.dataset = dataset
-        # we move the transforms to cpu, because it's possible that this
-        # dataset will be used for some datastream. In that case, the
-        # dataset needs to be pickable, which will not happen if the
-        # transform is on GPU. We will move to gpu if desired only in
-        # the getitem method, assuming that we are in the right process
-        # at this stage.
-        # IMPORTANT: If you are using a TransformedDataset in multiprocessing,
-        # and with a datastream, be extra-sure NOT to access its element before
-        # running the stream.
-        if transform is not None:
-            transform = copy.deepcopy(transform).to('cpu')
-        if target_transform is not None:
-            target_transform = copy.deepcopy(target_transform).to('cpu')
+        self.streamable = streamable
+        self.cudastream = cudastream
+        if streamable:
+            if transform is not None:
+                transform = copy.deepcopy(transform).to('cpu')
+            if target_transform is not None:
+                target_transform = copy.deepcopy(target_transform).to('cpu')
         self.transform = transform
         self.target_transform = target_transform
-        self.device = device
 
     def __getitem__(self, indices):
-        if self.transform is not None:
-            self.transform.to(self.device)
-        if self.target_transform is not None:
-            self.target_transform.to(self.device)
+        cuda = False
+        if self.streamable and self.cudastream:
+            cuda = True
+            if self.transform is not None:
+                self.transform = self.transform.to('cuda')
+            if self.target_transform is not None:
+                self.target_transform = self.target_transform.to(self.device)
         with torch.no_grad():
             try:
                 _ = iter(indices)
@@ -127,10 +154,10 @@ class TransformedDataset:
             result = []
             for id in indices:
                 (X, y) = self.dataset[id]
-                if isinstance(X, torch.Tensor):
-                    X = X.to(self.device)
-                if isinstance(y, torch.Tensor):
-                    y = y.to(self.device)
+                if cuda and isinstance(X, torch.Tensor):
+                    X = X.to('cuda')
+                if cuda and isinstance(y, torch.Tensor):
+                    y = y.to('cuda')
                 result += [
                  (X if self.transform is None else self.transform(X),
                   (y if self.target_transform is None
