@@ -89,13 +89,20 @@ class GSW:
     """
 
     def __init__(self, dataset,
-                 num_percentiles=500, num_examples=5000,
+                 num_percentiles=500,
+                 num_examples=5000,
                  projectors=5000,
+                 batchsize=1,
+                 manual_refresh=False,
                  asynchronous=True,
                  device='cpu',
                  num_workers_data=2,
                  num_sketchers=2):
         """Create a GSW object.
+
+        Parameters:
+        -----------
+
         dataset: Dataset object
             the object which contains the data against which we will compute
             the GSW distance
@@ -103,13 +110,28 @@ class GSW:
             the number of percentiles to compute on the dataset to perform
             comparison. If this is too high for a particular batch, then only
             a subset of those will be used for computing the GSW,
-        projectors: either a dataset of torch Modules (such as a
-                    ModulesDataset object) or an int
+        projectors: {int | dataset of torch Modules (such as a
+                    ModulesDataset object)}
             specifies the projectors that will be used. If it is an int,
             then a new ModulesDataset object will be created with the
             LinearProjector class and this number of projections,
             leading to the sliced Wasserstein distance. If it is a dataset
             of torch Module objects, will be used directly.
+        batchsize: int [scalar]
+            The cost is obtained by accumulating the result over `batchsize`
+            different random projectors. This is useful in the case too many
+            projections are desired that cannot be computed in a single shot.
+        manual_refresh: boolean
+            if False (default), then the `batchsize` projectors to use for
+            sketching will be automatically drawn anew at each call, yielding
+            different target quantiles each time.
+            If True, the user must explicitly call the `udpate` function
+            whenever new targets are desired
+        asynchronous: boolean
+            if True, will internally start a stream, meaning that the dataset
+            will continuously be sketched in a parallel fashion. This makes
+            computation of reference quantiles faster. If False, reference
+            quantiles will be computed on demand
         device: 'cpu' or 'cuda'
             the device on which to perform the sketching
         num_workers_data: int
@@ -148,44 +170,72 @@ class GSW:
                                  num_epochs=1,
                                  num_workers=num_sketchers)
         self.target_percentiles = None
-        self.projector_id = None
+        self.projector_ids = None
+        self.manual_refresh = manual_refresh
+        self.batchsize = batchsize
+        self.device = device
 
-    def __call__(self, batch, blocking=True, new_target=True):
+    def refresh(self):
+        """refreshes the targets of the GSW object
+
+        This function draws anew the projections to use for the computation
+        of the GSW cost, and computes the associated target percentiles on the
+        data.
+        """
+        if self.asynchronous:
+            self.target_percentiles = []
+            self.projector_ids = []
+            for item in range(self.batchsize):
+                    (target_percentiles,
+                     projector_id) = self.sketcher.queue.get()
+                    self.target_percentiles += [target_percentiles, ]
+                    self.projector_ids += [projector_id, ]
+        else:
+            self.projector_ids = torch.randint(low=0,
+                                               high=len(self.projectors),
+                                               size=(self.batchsize,))
+            # avoiding to put all the projectors in memory, calling one by one
+            self.target_percentiles = [self.sketcher(self.projectors[id])
+                                       for id in self.projector_ids]
+
+    def __call__(self, batch):
         """"compute the (generalized) sliced Wasserstein distance between
         the object dataset and the provided batch
+
         batch: torch.Tensor (num_samples, ) + sample_shape
             the batch of samples for which to compute the GSW distance to
-            the dataset.
-        blocking: boolean
-            whether or not to wait for the sketchers to have provided one
-            available set of percentiles computed on the data."""
+            the dataset."""
+        # update the target if required
+        if (self.target_percentiles is None) or not self.manual_refresh:
+            self.refresh()
 
-        if new_target or (self.target_percentiles is None):
-            if self.asynchronous:
-                try:
-                    (self.target_percentiles,
-                     self.projector_id) = self.sketcher.queue.get(blocking)
-                except queue.Empty:
-                    return None
-            else:
-                self.projector_id = torch.randint(low=0,
-                                                  high=len(self.projectors),
-                                                  size=(1,)).item()
-                projector = self.projectors[self.projector_id]
-                self.target_percentiles = self.sketcher(projector)
+        # bringing the target percentiles to the batch device (if not done)
+        # already
+        self.target_percentiles = [t.to(batch.device) for t in
+                                   self.target_percentiles]
 
-        target_percentiles = self.target_percentiles.to(batch.device)
-        projector = self.projectors[self.projector_id]
+        # if the batch is too small, we may have to reduce the number of
+        # percentiles
         num_percentiles = min(batch.shape[0], self.num_percentiles)
         if num_percentiles != self.num_percentiles:
-            # this may happen if the batch is too small
             indices = searchsorted(
                         self.percentiles[None, :],
                         torch.linspace(0, 100, num_percentiles)[None, :]
                         ).long()
-            percentiles = self.percentiles[indices].squeeze()
-            target_percentiles = target_percentiles[indices].squeeze()
         else:
-            percentiles = self.percentiles
-        test_percentiles = sketch(projector, batch, percentiles)
-        return torch.nn.MSELoss()(target_percentiles, test_percentiles)
+            indices = Ellipsis
+        percentiles = self.percentiles[indices].squeeze()
+
+        loss = torch.tensor(0, device=batch.device)
+        for (projector_id, target_percentiles) in zip(
+                                    self.projector_ids,
+                                    self.target_percentiles):
+            # get the projector
+            projector = self.projectors[projector_id]
+            test_percentiles = sketch(projector, batch, percentiles)
+            loss = loss + torch.nn.MSELoss()(
+                target_percentiles[indices].squeeze(),
+                test_percentiles.to(batch.device))
+
+        loss = loss / self.batchsize
+        return loss
