@@ -39,6 +39,11 @@ class DataStream:
         self.num_workers = num_workers
 
     def stream(self):
+        # if the dataset has a `_pack` function, we call it before streaming
+        packfn = getattr(self.params['dataset'], '_pack', None)
+        if packfn is not None and callable(packfn):
+            packfn()
+        # let's go
         self.process = mp.Process(
                             target=data_worker,
                             kwargs={'device': self.device,

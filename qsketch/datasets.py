@@ -105,17 +105,6 @@ class TransformedDataset:
             the module to apply to the 'input' items of the dataset
         target_transform: torch Module
             module to apply to the 'target' items of the dataset
-        streamable: boolean
-            if this dataset is to be used with a datastream, we:
-            * copy the transforms, because we are going to use them
-              in multiprocessing.
-            * move them to cpu, because the dataset needs to be pickable,
-              which will not happen if the transform is on GPU. We will move
-              to gpu if desired only in the getitem method, assuming that we
-              are in the right process at this stage.
-        cudastream: boolean
-            if streamable is False, this parameter is ignored.
-            otherwise, if True, the transforms will be transferred to cuda.
 
         Warning
         -------
@@ -126,44 +115,69 @@ class TransformedDataset:
 
         """
         self.dataset = dataset
-        self.streamable = streamable
-        self.cudastream = cudastream
-        if streamable:
-            if transform is not None:
-                transform = copy.deepcopy(transform).to('cpu')
-            if target_transform is not None:
-                target_transform = copy.deepcopy(target_transform).to('cpu')
         self.transform = transform
         self.target_transform = target_transform
 
+        # initially, the dataset is not packed for streaming
+        self.packed = False
+
     def __getitem__(self, indices):
-        cuda = False
-        if self.streamable and self.cudastream:
-            cuda = True
+        if self.packed:
             if self.transform is not None:
-                self.transform = self.transform.to('cuda')
+                for (p, device) in zip(self.transform.parameters(),
+                                       self.transform_devices):
+                    p = p.to(device)
             if self.target_transform is not None:
-                self.target_transform = self.target_transform.to(self.device)
-        with torch.no_grad():
-            try:
-                _ = iter(indices)
-                iterable = True
-            except TypeError as te:
-                indices = [indices]
-                iterable = False
-            result = []
-            for id in indices:
-                (X, y) = self.dataset[id]
-                if cuda and isinstance(X, torch.Tensor):
-                    X = X.to('cuda')
-                if cuda and isinstance(y, torch.Tensor):
-                    y = y.to('cuda')
-                result += [
-                 (X if self.transform is None else self.transform(X),
-                  (y if self.target_transform is None
-                   else self.target_transform(y)))
+                for (p, device) in zip(self.target_transform.parameters(),
+                                       self.target_transform_devices):
+                    p = p.to(device)
+            self.packed = False
+
+        try:
+            _ = iter(indices)
+            iterable = True
+        except TypeError as te:
+            indices = [indices]
+            iterable = False
+        result = []
+        for id in indices:
+            (X, y) = self.dataset[id]
+            # if cuda and isinstance(X, torch.Tensor):
+            #     X = X.to('cuda')
+            # if cuda and isinstance(y, torch.Tensor):
+            #     y = y.to('cuda')
+            result += [
+             (X if self.transform is None else self.transform(X),
+              (y if self.target_transform is None
+               else self.target_transform(y)))
+            ]
+        return result[0] if not iterable else result
+
+        def _pack(self):
+            """prepare the dataset for streaming
+
+            copy the transforms, because we are going to use them
+            in multiprocessing.
+
+            also put the transfroms to cpu, because the dataset needs to be
+            pickable, which will not be the case  if the transforms are on GPU.
+            We will move them to their initial device only in the first call
+            to the getitem method, after this, assuming that we are in the
+            right process at this stage.
+            """
+            print('WE PACK')
+            if self.transform is not None:
+                self.transform_devices = [
+                    p.device for p in self.transform.parameters()
                 ]
-            return result[0] if not iterable else result
+                self.transform = copy.deepcopy(self.transform).to('cpu')
+            if self.target_transform is not None:
+                self.target_transform_devices = [
+                    p.device for p in self.target_transform.parameters()
+                ]
+                self.target_transform = (
+                    copy.deepcopy(self.target_transform).to('cpu'))
+            self.packed = True
 
     def __len__(self):
         return len(self.dataset)
