@@ -92,7 +92,7 @@ class TransformedDataset:
     """ Create a dataset """
 
     def __init__(self, dataset, transform=None, target_transform=None,
-                 device='cpu'):
+                 streamable=True, cudastream=False):
         """Create a TransformeDataset object, whose items are obtained by
         applying a specified torch Module to the items and the targets of
         some other dataset.
@@ -105,9 +105,7 @@ class TransformedDataset:
             the module to apply to the 'input' items of the dataset
         target_transform: torch Module
             module to apply to the 'target' items of the dataset
-        device: {'cpu'|'cuda'}
-            the device to which the dataset items should be put before
-            transformation
+
         Warning
         -------
         If you are using a TransformedDataset in multiprocessing, as with a
@@ -122,8 +120,6 @@ class TransformedDataset:
 
         # initially, the dataset is not packed for streaming
         self.packed = False
-        self.device = device 
-        import ipdb; ipdb.set_trace()
 
     def __getitem__(self, indices):
         if self.packed:
@@ -146,10 +142,10 @@ class TransformedDataset:
         result = []
         for id in indices:
             (X, y) = self.dataset[id]
-            if isinstance(X, torch.Tensor):
-                X = X.to(self.device)
-            if isinstance(y, torch.Tensor):
-                y = y.to(self.device)
+            # if cuda and isinstance(X, torch.Tensor):
+            #     X = X.to('cuda')
+            # if cuda and isinstance(y, torch.Tensor):
+            #     y = y.to('cuda')
             result += [
              (X if self.transform is None else self.transform(X),
               (y if self.target_transform is None
@@ -157,31 +153,31 @@ class TransformedDataset:
             ]
         return result[0] if not iterable else result
 
-        def _pack(self):
-            """prepare the dataset for streaming
+    def _pack(self):
+        """prepare the dataset for streaming
 
-            copy the transforms, because we are going to use them
-            in multiprocessing.
+        copy the transforms, because we are going to use them
+        in multiprocessing.
 
-            also put the transfroms to cpu, because the dataset needs to be
-            pickable, which will not be the case  if the transforms are on GPU.
-            We will move them to their initial device only in the first call
-            to the getitem method, after this, assuming that we are in the
-            right process at this stage.
-            """
-            print('WE PACK')
-            if self.transform is not None:
-                self.transform_devices = [
-                    p.device for p in self.transform.parameters()
-                ]
-                self.transform = copy.deepcopy(self.transform).to('cpu')
-            if self.target_transform is not None:
-                self.target_transform_devices = [
-                    p.device for p in self.target_transform.parameters()
-                ]
-                self.target_transform = (
-                    copy.deepcopy(self.target_transform).to('cpu'))
-            self.packed = True
+        also put the transfroms to cpu, because the dataset needs to be
+        pickable, which will not be the case  if the transforms are on GPU.
+        We will move them to their initial device only in the first call
+        to the getitem method, after this, assuming that we are in the
+        right process at this stage.
+        """
+        print('WE PACK')
+        if self.transform is not None:
+            self.transform_devices = [
+                p.device for p in self.transform.parameters()
+            ]
+            self.transform = copy.deepcopy(self.transform).to('cpu')
+        if self.target_transform is not None:
+            self.target_transform_devices = [
+                p.device for p in self.target_transform.parameters()
+            ]
+            self.target_transform = (
+                copy.deepcopy(self.target_transform).to('cpu'))
+        self.packed = True
 
     def __len__(self):
         return len(self.dataset)
