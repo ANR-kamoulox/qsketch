@@ -105,6 +105,11 @@ class TransformedDataset:
             the module to apply to the 'input' items of the dataset
         target_transform: torch Module
             module to apply to the 'target' items of the dataset
+        device: {'cpu'|'cuda'}
+            the device on which transformation must be done and to which
+            the transforms will be sent in each process in the case this
+            dataset is used with a DataStream object. Otherwise, it's up to
+            the user to make sure that the transform is on this right device.
 
         Warning
         -------
@@ -125,18 +130,9 @@ class TransformedDataset:
     def __getitem__(self, indices):
         if self.packed:
             if self.transform is not None:
-                state = self.transform.state_dict()
-                for (p,device) in zip(state,
-                                      self.transform_devices):
-                    print(p, device)
-                    state[p] = state[p].to(device)
-                self.transform.load_state_dict(state)
+                self.transform = self.transform.to(self.device)
             if self.target_transform is not None:
-                state = self.target_transform.state_dict()
-                for (p,device) in zip(state,
-                                      self.target_transform_devices):
-                    state[p] = state[p].to(device)
-                self.target_transform.load_state_dict(state)
+                self.target_transform = self.target_transform.to(self.device)
             self.packed = False
 
         try:
@@ -168,22 +164,14 @@ class TransformedDataset:
 
         also put the transfroms to cpu, because the dataset needs to be
         pickable, which will not be the case  if the transforms are on GPU.
-        We will move them to their initial device only in the first call
-        to the getitem method, after this, assuming that we are in the
+        We will move them to self.device only in the first call
+        to the getitem method, after now, assuming that we are in the
         right process at this stage.
         """
         print('WE PACK')
         if self.transform is not None:
-            state = self.transform.state_dict()
-            self.transform_devices = [
-                state[param].device for param in state
-            ]
             self.transform = copy.deepcopy(self.transform).to('cpu')
         if self.target_transform is not None:
-            state = self.target_transform.state_dict()
-            self.target_transform_devices = [
-                state[param].device for param in state
-            ]
             self.target_transform = (
                 copy.deepcopy(self.target_transform).to('cpu'))
         self.packed = True
