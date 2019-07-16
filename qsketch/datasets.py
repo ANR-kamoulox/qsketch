@@ -92,7 +92,7 @@ class TransformedDataset:
     """ Create a dataset """
 
     def __init__(self, dataset, transform=None, target_transform=None,
-                 streamable=True, cudastream=False):
+                 device='cpu'):
         """Create a TransformeDataset object, whose items are obtained by
         applying a specified torch Module to the items and the targets of
         some other dataset.
@@ -120,17 +120,24 @@ class TransformedDataset:
 
         # initially, the dataset is not packed for streaming
         self.packed = False
+        self.device = device
 
     def __getitem__(self, indices):
         if self.packed:
-            if self.transform is not None:
-                for (p, device) in zip(self.transform.parameters(),
-                                       self.transform_devices):
-                    p = p.to(device)
+            if self.transform is not None:                
+                state = self.transform.state_dict()
+                for (p,device) in zip(state,
+                                      self.transform_devices):
+                    print(p, device)
+                    state[p] = state[p].to(device)
+                self.transform.load_state_dict(state)
             if self.target_transform is not None:
-                for (p, device) in zip(self.target_transform.parameters(),
-                                       self.target_transform_devices):
-                    p = p.to(device)
+                state = self.target_transform.state_dict()
+                for (p,device) in zip(state,
+                                      self.target_transform_devices):
+                    state[p] = state[p].to(device)
+                self.target_transform.load_state_dict(state)
+            import ipdb; ipdb.set_trace()
             self.packed = False
 
         try:
@@ -142,10 +149,11 @@ class TransformedDataset:
         result = []
         for id in indices:
             (X, y) = self.dataset[id]
-            # if cuda and isinstance(X, torch.Tensor):
-            #     X = X.to('cuda')
-            # if cuda and isinstance(y, torch.Tensor):
-            #     y = y.to('cuda')
+            if isinstance(X, torch.Tensor):
+                X = X.to(self.device)
+            if isinstance(y, torch.Tensor):
+                y = y.to(self.device)
+            import ipdb; ipdb.set_trace()
             result += [
              (X if self.transform is None else self.transform(X),
               (y if self.target_transform is None
@@ -167,13 +175,15 @@ class TransformedDataset:
         """
         print('WE PACK')
         if self.transform is not None:
+            state = self.transform.state_dict()
             self.transform_devices = [
-                p.device for p in self.transform.parameters()
+                state[param].device for param in state
             ]
             self.transform = copy.deepcopy(self.transform).to('cpu')
         if self.target_transform is not None:
+            state = self.target_transform.state_dict()
             self.target_transform_devices = [
-                p.device for p in self.target_transform.parameters()
+                state[param].device for param in state
             ]
             self.target_transform = (
                 copy.deepcopy(self.target_transform).to('cpu'))
