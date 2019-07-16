@@ -92,7 +92,7 @@ class TransformedDataset:
     """ Create a dataset """
 
     def __init__(self, dataset, transform=None, target_transform=None,
-                 streamable=True, cudastream=False):
+                 device='cpu'):
         """Create a TransformeDataset object, whose items are obtained by
         applying a specified torch Module to the items and the targets of
         some other dataset.
@@ -105,7 +105,9 @@ class TransformedDataset:
             the module to apply to the 'input' items of the dataset
         target_transform: torch Module
             module to apply to the 'target' items of the dataset
-
+        device: {'cpu'|'cuda'}
+            the device to which the dataset items should be put before
+            transformation
         Warning
         -------
         If you are using a TransformedDataset in multiprocessing, as with a
@@ -120,6 +122,8 @@ class TransformedDataset:
 
         # initially, the dataset is not packed for streaming
         self.packed = False
+        self.device = device 
+        import ipdb; ipdb.set_trace()
 
     def __getitem__(self, indices):
         if self.packed:
@@ -142,10 +146,10 @@ class TransformedDataset:
         result = []
         for id in indices:
             (X, y) = self.dataset[id]
-            # if cuda and isinstance(X, torch.Tensor):
-            #     X = X.to('cuda')
-            # if cuda and isinstance(y, torch.Tensor):
-            #     y = y.to('cuda')
+            if isinstance(X, torch.Tensor):
+                X = X.to(self.device)
+            if isinstance(y, torch.Tensor):
+                y = y.to(self.device)
             result += [
              (X if self.transform is None else self.transform(X),
               (y if self.target_transform is None

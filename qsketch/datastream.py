@@ -26,8 +26,16 @@ class DataStream:
         # create a new multiprocessing manager
         self.manager = mp.Manager()
 
+        # if the dataset has a `_pack` function, we call it now
+        packfn = getattr(dataset, '_pack', None)
+        import ipdb; ipdb.set_trace()
+        if packfn is not None and callable(packfn):
+            print('we call pack')
+            packfn()
+
         # prepare some data for the synchronization of the workers
         self.params = self.manager.dict()
+
         self.params['dataset'] = dataset
         self.params['die'] = False
         self.params['num_epochs'] = num_epochs
@@ -39,10 +47,6 @@ class DataStream:
         self.num_workers = num_workers
 
     def stream(self):
-        # if the dataset has a `_pack` function, we call it before streaming
-        packfn = getattr(self.params['dataset'], '_pack', None)
-        if packfn is not None and callable(packfn):
-            packfn()
         # let's go
         self.process = mp.Process(
                             target=data_worker,
