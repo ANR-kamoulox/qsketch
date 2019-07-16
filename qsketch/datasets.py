@@ -124,7 +124,7 @@ class TransformedDataset:
 
     def __getitem__(self, indices):
         if self.packed:
-            if self.transform is not None:                
+            if self.transform is not None:
                 state = self.transform.state_dict()
                 for (p,device) in zip(state,
                                       self.transform_devices):
@@ -137,7 +137,6 @@ class TransformedDataset:
                                       self.target_transform_devices):
                     state[p] = state[p].to(device)
                 self.target_transform.load_state_dict(state)
-            import ipdb; ipdb.set_trace()
             self.packed = False
 
         try:
@@ -153,7 +152,7 @@ class TransformedDataset:
                 X = X.to(self.device)
             if isinstance(y, torch.Tensor):
                 y = y.to(self.device)
-            import ipdb; ipdb.set_trace()
+            #import ipdb; ipdb.set_trace()
             result += [
              (X if self.transform is None else self.transform(X),
               (y if self.target_transform is None

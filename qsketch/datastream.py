@@ -28,7 +28,6 @@ class DataStream:
 
         # if the dataset has a `_pack` function, we call it now
         packfn = getattr(dataset, '_pack', None)
-        import ipdb; ipdb.set_trace()
         if packfn is not None and callable(packfn):
             print('we call pack')
             packfn()
