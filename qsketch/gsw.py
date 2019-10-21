@@ -74,8 +74,8 @@ def sw(batch1, batch2, num_projections=1000):
     sketch1 = sketch(projectors, batch1, percentiles)
     sketch2 = sketch(projectors, batch2, percentiles)
 
-    # return SW as the average of the squared error between them
-    return torch.nn.MSELoss()(sketch1, sketch2)
+    # return SW as the sum of the squared error between them
+    return torch.nn.MSELoss(reduction='sum')(sketch1, sketch2)
 
 
 class GSW:

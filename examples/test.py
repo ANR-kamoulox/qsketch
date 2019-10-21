@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torchvision import datasets, transforms
 import qsketch
-from torchvision.utils import save_image
+from torchvision.utils import save_image, make_grid
 import torch.multiprocessing as mp
 from pathlib import Path
 from tqdm import trange
@@ -69,27 +69,38 @@ if __name__ == "__main__":
     with random projections, excluding the trick presented in section 3.2
     of this aforementioned paper.
     """
-
     # this is important to do this at the very beginning of the program
     mp.set_start_method('spawn', force=True)
+
+    # whether to output to disk (~/test_generative_SWcost folder) or just plot
+    disk_save = False
+
+    # refresh plot every... iterations
+    plot_rate = 1000
 
     # input dimension to the generative model
     input_dim = 64
 
     # number of samples to use per update
-    num_samples = 1024
+    num_samples = 512
 
     # number of iterations
     num_iters = 100000
 
     # Sliced-Wasserstein parameters
-    num_projections = 10000
+    num_projections = 50
     num_sw_batches = 1
     num_percentiles = num_samples
     refresh_rate = 50  # we change the target projections every few iterations
 
-    plot_path = Path('~/testgenerative_SWcost').expanduser()
-    plot_path.mkdir(exist_ok=True, parents=True)
+    #
+    if disk_save:
+        plot_path = Path('~/testgenerative_SWcost').expanduser()
+        plot_path.mkdir(exist_ok=True, parents=True)
+    else:
+        import matplotlib.pyplot as plt
+        plt.ion()
+        plt.show()
 
     # load the data
     data = datasets.MNIST('~/data/',
@@ -104,15 +115,21 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     # create a sliced wasserstein loss object
+    if torch.cuda.is_available():
+        sketcher_device = 'cuda'
+        num_sketchers = 2
+    else:
+        sketcher_device = 'cpu'
+        num_sketchers = max(1, int(mp.cpu_count()/2))
     sw = qsketch.gsw.GSW(dataset=data,
                          num_percentiles=num_percentiles,
                          num_examples=num_samples,
                          projectors=num_projections,
                          batchsize=num_sw_batches,
                          manual_refresh=True,
-                         device='cpu',
+                         device=sketcher_device,
                          num_workers_data=max(1, int(mp.cpu_count()/2)),
-                         num_sketchers=max(1, int(mp.cpu_count()/2)))
+                         num_sketchers=num_sketchers)
 
     # monitoring the average training loss every few iterations
     train_loss = 0
@@ -131,14 +148,27 @@ if __name__ == "__main__":
         optimizer.step()
 
         # now display every few epochs
-        if iteration and not iteration % refresh_rate:
+        if not iteration % refresh_rate:
             sw.refresh()
-            train_loss += loss.item()
             bar.set_description('Training with SW. loss=%f' % loss.item())
             bar.refresh()
-            save_image(samples[:104],
-                       filename=(plot_path /
-                                 Path('samples_%04d.png' % iteration
-                                      ).with_suffix('.png')),
-                       nrow=8, padding=2, normalize=True, scale_each=True)
+
+        if iteration and not iteration % plot_rate:
+            if not disk_save:
+                grid_img = make_grid(samples[:104].detach(), nrow=8, padding=2,
+                                     normalize=True, scale_each=True)
+                plt.imshow(grid_img.permute(1, 2, 0).cpu().numpy(),
+                           aspect='auto')
+                plt.gca().get_xaxis().set_visible(False)
+                plt.gca().get_yaxis().set_visible(False)
+                plt.title('Particles generated after %d iterations '
+                          % iteration)
+                plt.draw()
+                plt.pause(0.001)
+            else:
+                save_image(samples[:104],
+                           filename=(plot_path /
+                                     Path('samples_%04d.png' % iteration
+                                          ).with_suffix('.png')),
+                           nrow=8, padding=2, normalize=True, scale_each=True)
             train_loss = 0
