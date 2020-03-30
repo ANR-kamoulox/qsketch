@@ -4,24 +4,19 @@ from setuptools import setup, find_packages
 from codecs import open
 from os import path
 
+# trying to import the required torch package
+try:
+    import torch
+except ImportError:
+    raise Exception('qsketch requires PyTorch to be installed. aborting')
+
 here = path.abspath(path.dirname(__file__))
 
 # Get the long description from the README file
 with open(path.join(here, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
-import shutil
-if shutil.which('nvcc'):
-    # CUDA is there.
-    torch_packages = [
-            "torch>=1.4.0",
-            "torchvision>=0.5.0"
-        ]
-else:
-    torch_packages = [
-            "torch>=1.4.0[cpu]",
-            "torchvision>=0.5.0[cpu]"
-        ]
+
 
 # Proceed to setup
 setup(
@@ -38,12 +33,8 @@ setup(
 
     keywords='compressed learning sliced wasserstein',
     install_requires=[
-        *torch_packages,
         'torchsearchsorted @ git+https://github.com/aliutkus/torchsearchsorted',
         'torchpercentile @git+https://github.com/aliutkus/torchpercentile',
         'torchpercentile @git+https://github.com/aliutkus/torchinterp1d',
     ],
-    dependency_links=[
-        "https://download.pytorch.org/whl/torch_stable.html"
-    ]
     )
